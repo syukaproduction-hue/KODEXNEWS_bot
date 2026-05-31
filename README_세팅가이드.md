@@ -73,3 +73,5 @@
 - 봇이 자동 발송을 안 함 → `TARGET_CHAT_ID` 가 비었는지 확인(⑤). 그룹은 ID가 `-100...` 으로 시작.
 - `/brief` 가 오류 → Railway Variables 의 `ANTHROPIC_API_KEY` 오타/크레딧 잔액 확인.
 - 로그에 401/Unauthorized → 키가 잘못됨. 키를 다시 발급해 Variables 만 교체(코드 수정 불필요).
+
+.
