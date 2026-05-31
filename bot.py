@@ -33,6 +33,7 @@ TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID", "").strip()
 
 TZ = pytz.timezone(settings.TIMEZONE)
 PROMPT_PATH = Path(__file__).parent / "briefing_prompt.md"
+SCRIPT_PROMPT_PATH = Path(__file__).parent / "script_prompt.md"
 
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -132,6 +133,27 @@ async def generate_brief() -> str:
     return await asyncio.to_thread(generate_brief_sync)
 
 
+# ---------- Claude 호출 (숏폼 스크립트 생성) ----------
+def generate_script_sync(user_request: str) -> str:
+    base = SCRIPT_PROMPT_PATH.read_text(encoding="utf-8")
+    system_text = base + "\n\n" + build_products_block()
+    resp = anthropic_client.messages.create(
+        model=settings.MODEL,
+        max_tokens=settings.MAX_TOKENS,
+        system=system_text,
+        messages=[{"role": "user", "content": f"다음 이슈로 숏폼 스크립트를 써줘:\n{user_request}"}],
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+    )
+    parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
+    text = "\n".join(p for p in parts if p).strip()
+    text = clean_for_telegram(text)
+    return text or "스크립트 생성 결과가 비어 있습니다. 잠시 후 다시 시도해 주세요."
+
+
+async def generate_script(user_request: str) -> str:
+    return await asyncio.to_thread(generate_script_sync, user_request)
+
+
 # ---------- 긴 메시지 분할 발송 (줄 단위) ----------
 async def send_long(bot, chat_id, text: str):
     if len(text) <= TG_LIMIT:
@@ -152,7 +174,9 @@ async def send_long(bot, chat_id, text: str):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "KODEX 시황 뉴스봇입니다.\n"
-        "· /brief : 지금 즉시 브리핑 받아보기 (테스트)\n"
+        "· /brief : 지금 즉시 시황 브리핑 받아보기\n"
+        "· /script <이슈와 상품> : 숏폼 스크립트 만들기\n"
+        "   예) /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로\n"
         "· /chatid : 이 채팅방의 ID 확인\n"
         "평일 오전 9시에 자동으로 브리핑을 보냅니다."
     )
@@ -160,6 +184,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"이 채팅 ID: {update.effective_chat.id}")
+
+
+async def cmd_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    request = " ".join(context.args).strip()
+    if not request:
+        await update.message.reply_text(
+            "사용법: /script 다음에 이슈와 원하는 상품을 적어주세요.\n"
+            "예) /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로 숏폼"
+        )
+        return
+    await update.message.reply_text("스크립트를 작성 중입니다… (웹 검색 포함, 30초~1분 소요)")
+    try:
+        text = await generate_script(request)
+        await send_long(context.bot, update.effective_chat.id, text)
+    except Exception as e:
+        log.exception("script failed")
+        await update.message.reply_text(f"스크립트 생성 중 오류가 발생했습니다: {e}")
 
 
 async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -201,6 +242,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("script", cmd_script))
 
     app.job_queue.run_daily(
         daily_brief_job,
