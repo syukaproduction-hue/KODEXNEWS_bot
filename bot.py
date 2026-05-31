@@ -50,11 +50,16 @@ def clean_for_telegram(text: str) -> str:
         line = re.sub(r"^\s*>\s?", "", line)              # > 인용 기호 제거
         line = re.sub(r"^(\s*)[*+]\s+", r"\1· ", line)    # 마크다운 불릿 *,+ → ·
         line = re.sub(r"\*([^*\n]+)\*", r"\1", line)       # 남은 *기울임* 제거
+        if re.fullmatch(r"\s*(-{3,}|\*{3,}|_{3,})\s*", line):  # --- *** ___ 구분선 제거
+            continue
         if re.fullmatch(r"\s*[-·*•]\s*", line):            # 내용 없는 불릿 줄 삭제
             continue
         out.append(line)
     text = "\n".join(out)
     text = re.sub(r"\n{3,}", "\n\n", text)                # 빈 줄 3개 이상 → 2개
+    sun = text.find("☀")                                  # 브리핑 앞 군더더기 문장 제거
+    if sun > 0:
+        text = text[sun:]
     return text.strip()
 
 
