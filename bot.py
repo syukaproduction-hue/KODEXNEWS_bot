@@ -7,6 +7,7 @@ KODEX 시황 뉴스봇
 """
 
 import os
+import re
 import asyncio
 import logging
 from datetime import datetime, timedelta, time
@@ -36,6 +37,25 @@ PROMPT_PATH = Path(__file__).parent / "briefing_prompt.md"
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
+TG_LIMIT = 4096
+
+
+# ---------- 마크다운 기호 제거 + 줄바꿈 정리 ----------
+def clean_for_telegram(text: str) -> str:
+    text = text.replace("**", "").replace("__", "").replace("`", "")
+    out = []
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        line = re.sub(r"^\s*#{1,6}\s*", "", line)        # # 헤더 기호 제거
+        line = re.sub(r"^\s*>\s?", "", line)              # > 인용 기호 제거
+        line = re.sub(r"^(\s*)[*+]\s+", r"\1· ", line)    # 마크다운 불릿 *,+ → ·
+        line = re.sub(r"\*([^*\n]+)\*", r"\1", line)       # 남은 *기울임* 제거
+        if re.fullmatch(r"\s*[-·*•]\s*", line):            # 내용 없는 불릿 줄 삭제
+            continue
+        out.append(line)
+    text = "\n".join(out)
+    text = re.sub(r"\n{3,}", "\n\n", text)                # 빈 줄 3개 이상 → 2개
+    return text.strip()
 
 
 # ---------- 날짜/기간 안내문 만들기 ----------
@@ -99,6 +119,7 @@ def generate_brief_sync() -> str:
     )
     parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
     text = "\n".join(p for p in parts if p).strip()
+    text = clean_for_telegram(text)
     return text or "브리핑 생성 결과가 비어 있습니다. 잠시 후 다시 시도해 주세요."
 
 
@@ -106,11 +127,20 @@ async def generate_brief() -> str:
     return await asyncio.to_thread(generate_brief_sync)
 
 
-# ---------- 긴 메시지 분할 발송 ----------
+# ---------- 긴 메시지 분할 발송 (줄 단위) ----------
 async def send_long(bot, chat_id, text: str):
-    limit = 4000
-    for i in range(0, len(text), limit):
-        await bot.send_message(chat_id=chat_id, text=text[i:i + limit])
+    if len(text) <= TG_LIMIT:
+        await bot.send_message(chat_id=chat_id, text=text)
+        return
+    chunk = ""
+    for line in text.split("\n"):
+        if len(chunk) + len(line) + 1 > TG_LIMIT:
+            if chunk:
+                await bot.send_message(chat_id=chat_id, text=chunk)
+            chunk = ""
+        chunk = (chunk + "\n" + line) if chunk else line
+    if chunk:
+        await bot.send_message(chat_id=chat_id, text=chunk)
 
 
 # ---------- 명령 핸들러 ----------
