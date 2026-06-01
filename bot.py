@@ -41,6 +41,8 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 # 운영자(마케터) 본인 ID. /stats 권한용. Railway Variables에 ADMIN_CHAT_ID로 넣으면 됨.
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "").strip()
+# 자동 브리핑을 발송할 채널 ID. Railway Variables에 TARGET_CHANNEL_ID로 넣음 (-100... 형태).
+TARGET_CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID", "").strip()
 
 TZ = pytz.timezone(settings.TIMEZONE)
 BASE = Path(__file__).parent
@@ -216,31 +218,28 @@ async def send_long(bot, chat_id, text: str):
 
 
 WELCOME = (
-    "KODEX 시황 뉴스봇입니다. 구독이 시작되었어요!\n\n"
-    "[주요 기능]\n"
-    "1. 오전 9시 브리핑: 밤사이 미국장 + 전날 마감\n"
-    "2. 오후 3:30 브리핑: 오늘 한국장 마감 + 장중 이벤트·소재 후보\n"
-    "3. 스크립트 작성 (사용법: /script 주요이슈 + 원하는 ETF 상품)\n\n"
-    "[즉시 명령]\n"
-    "· /brief : 지금 오전형 브리핑 받기\n"
-    "· /pm : 지금 오후형(장중) 브리핑 받기\n"
-    "· /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로\n"
-    "· /stop : 자동 발송 구독 해지\n\n"
-    "평일 오전 9시·오후 3:30에 자동으로 브리핑을 보내드립니다."
+    "KODEX 시황 뉴스봇입니다.\n\n"
+    "[자동 브리핑 — 채널에서]\n"
+    "1. 오전 9시: 밤사이 미국장 + 전날 마감\n"
+    "2. 오후 3:30: 오늘 한국장 마감 + 장중 이벤트·소재 후보\n"
+    "→ 자동 브리핑은 공식 채널에 평일 오전·오후로 올라옵니다. 채널을 구독해 두시면 됩니다.\n\n"
+    "[직접 명령 — 여기(1:1) 또는 팀 그룹방에서]\n"
+    "채널에서는 명령을 쓸 수 없어요. 아래 명령은 봇과의 1:1 대화나 봇을 추가한 그룹방에서 사용하세요.\n"
+    "· /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로  (숏폼 스크립트 작성)\n"
+    "· /brief  (지금 오전형 브리핑 받기)\n"
+    "· /pm  (지금 오후형 장중 브리핑 받기)\n"
 )
 
 
 # ===================== 명령 핸들러 =====================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    name = (chat.title or " ".join(filter(None, [chat.first_name, chat.last_name])) or chat.username or "")
-    add_subscriber(chat.id, name)
     await update.message.reply_text(WELCOME)
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    remove_subscriber(update.effective_chat.id)
-    await update.message.reply_text("자동 발송 구독을 해지했어요. 다시 받으려면 /start 를 눌러주세요.")
+    await update.message.reply_text(
+        "자동 브리핑은 공식 채널에서 발송됩니다. 받지 않으시려면 채널을 나가시면 돼요.\n"
+        "이 봇과의 1:1 대화에서는 /script, /brief, /pm 명령을 계속 쓸 수 있습니다.")
 
 
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -257,7 +256,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cost = (total_in / 1_000_000 * settings.PRICE_INPUT_PER_MTOK
             + total_out / 1_000_000 * settings.PRICE_OUTPUT_PER_MTOK)
     month = datetime.now(TZ).strftime("%Y-%m")
-    lines = [f"📊 {month} 사용 현황 (청구 참고용)", f"· 활성 구독자: {sub}명", ""]
+    lines = [f"📊 {month} 사용 현황 (청구 참고용)", ""]
     if rows:
         for kind, cnt, itok, otok in rows:
             lines.append(f"· {kind}: {cnt}회 (입력 {itok:,} / 출력 {otok:,} 토큰)")
@@ -310,11 +309,19 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     status = update.my_chat_member.new_chat_member.status
     if status in ("member", "administrator"):
-        log.info("봇이 채팅에 추가됨: id=%s type=%s title=%s", chat.id, chat.type, getattr(chat, "title", ""))
+        log.info("봇이 채팅에 추가됨: id=%s type=%s title=%s status=%s",
+                 chat.id, chat.type, getattr(chat, "title", ""), status)
+        # 채널/그룹에 추가되면 자동 발송 설정에 필요한 ID를 알려준다.
+        guide = (
+            f"봇이 추가되었습니다.\n"
+            f"이 채팅 ID: {chat.id}\n\n"
+            f"자동 9시·15:30 브리핑을 이 채널로 받으려면, "
+            f"Railway의 TARGET_CHANNEL_ID 값을 위 ID로 설정하세요. "
+            f"(봇이 이 채널의 관리자이고 '메시지 게시' 권한이 있어야 합니다.)")
         try:
-            await context.bot.send_message(chat_id=chat.id, text=WELCOME)
-            add_subscriber(chat.id, getattr(chat, "title", "") or "")
+            await context.bot.send_message(chat_id=chat.id, text=guide)
         except Exception:
+            # 채널은 권한 전이라 전송이 막힐 수 있음 → 로그(id=...)로 확인
             pass
 
 
@@ -323,22 +330,25 @@ async def broadcast(context, pm):
     today = datetime.now(TZ).date()
     if today.weekday() >= 5:
         log.info("주말이므로 자동 발송 건너뜀"); return
-    subs = active_subscribers()
-    if not subs:
-        log.warning("활성 구독자 없음 → 자동 발송 대상 없음"); return
+    if not TARGET_CHANNEL_ID:
+        log.warning("TARGET_CHANNEL_ID 미설정 → 자동 발송 대상 없음"); return
     try:
         text, itok, otok = await asyncio.to_thread(generate_brief_sync, pm)
-    except Exception as e:
+    except Exception:
         log.exception("auto brief gen failed"); return
     log_usage("AUTO", "pm" if pm else "brief", itok, otok)
-    sent = 0
-    for cid in subs:
-        try:
-            await send_long(context.bot, cid, text); sent += 1
-        except Exception:
-            log.warning("발송 실패(차단/탈퇴 추정) chat_id=%s", cid)
-            remove_subscriber(cid)
-    log.info("자동 %s 브리핑 발송 완료: %d명", "오후" if pm else "오전", sent)
+    try:
+        await send_long(context.bot, TARGET_CHANNEL_ID, text)
+        log.info("자동 %s 브리핑 채널 발송 완료", "오후" if pm else "오전")
+    except Exception as e:
+        log.exception("채널 발송 실패")
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"⚠️ 채널 자동 발송 실패: {e}\n봇이 채널 관리자인지, TARGET_CHANNEL_ID가 맞는지 확인하세요.")
+            except Exception:
+                pass
 
 
 async def job_am(context: ContextTypes.DEFAULT_TYPE):
