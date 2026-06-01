@@ -1,15 +1,21 @@
 """
 KODEX 시황 뉴스봇
-- 매일 평일 오전 9시(한국시간) 자동 브리핑 발송
-- /brief 명령으로 즉시 테스트 발송
-- /chatid 명령으로 현재 채팅 ID 확인
-운영자는 보통 이 파일을 수정할 필요가 없습니다. (설정은 settings.py)
+- 평일 오전 9시: 밤사이 미국장 + 전날 마감 브리핑
+- 평일 오후 3:30: 오늘 한국장 마감 + 장중 이벤트/소재 후보 브리핑
+- /brief, /pm : 즉시 브리핑(오전형/오후형)
+- /script <이슈+상품> : 숏폼 스크립트
+- /start : 구독 등록 (이걸 눌러야 자동 발송 명단에 들어감)
+- /stop : 구독 해지
+- /stats : (운영자 전용) 구독자 수·사용량·추정 비용
+- /chatid : 채팅 ID 확인
+설정은 settings.py, 브리핑 방식은 *_prompt.md 에서 수정합니다.
 """
 
 import os
 import re
 import asyncio
 import logging
+import sqlite3
 from datetime import datetime, timedelta, time
 from pathlib import Path
 
@@ -25,7 +31,6 @@ from telegram.ext import (
 
 import settings
 
-# ---------- 기본 설정 ----------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -34,136 +39,171 @@ log = logging.getLogger("kodex-bot")
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID", "").strip()
+# 운영자(마케터) 본인 ID. /stats 권한용. Railway Variables에 ADMIN_CHAT_ID로 넣으면 됨.
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "").strip()
 
 TZ = pytz.timezone(settings.TIMEZONE)
-PROMPT_PATH = Path(__file__).parent / "briefing_prompt.md"
-SCRIPT_PROMPT_PATH = Path(__file__).parent / "script_prompt.md"
+BASE = Path(__file__).parent
+PROMPT_AM = BASE / "briefing_prompt.md"
+PROMPT_PM = BASE / "briefing_pm_prompt.md"
+SCRIPT_PROMPT = BASE / "script_prompt.md"
+
+# DB 위치: Railway 볼륨을 /data 에 연결하면 영구 보존됨. 없으면 로컬 파일로 동작.
+DB_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+try:
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH = DB_DIR / "kodex_bot.db"
+except Exception:
+    DB_PATH = BASE / "kodex_bot.db"  # 볼륨 없을 때 임시(재배포 시 초기화될 수 있음)
 
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
-
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 TG_LIMIT = 4096
 
 
-# ---------- 마크다운 기호 제거 + 줄바꿈 정리 ----------
+# ===================== DB =====================
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""CREATE TABLE IF NOT EXISTS subscribers(
+        chat_id TEXT PRIMARY KEY, name TEXT, joined_at TEXT, active INTEGER DEFAULT 1)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS usage_log(
+        ts TEXT, chat_id TEXT, kind TEXT, in_tok INTEGER, out_tok INTEGER)""")
+    return conn
+
+
+def add_subscriber(chat_id, name):
+    conn = db()
+    conn.execute(
+        "INSERT INTO subscribers(chat_id,name,joined_at,active) VALUES(?,?,?,1) "
+        "ON CONFLICT(chat_id) DO UPDATE SET active=1, name=excluded.name",
+        (str(chat_id), name, datetime.now(TZ).isoformat()),
+    )
+    conn.commit(); conn.close()
+
+
+def remove_subscriber(chat_id):
+    conn = db()
+    conn.execute("UPDATE subscribers SET active=0 WHERE chat_id=?", (str(chat_id),))
+    conn.commit(); conn.close()
+
+
+def active_subscribers():
+    conn = db()
+    rows = conn.execute("SELECT chat_id FROM subscribers WHERE active=1").fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def log_usage(chat_id, kind, in_tok, out_tok):
+    conn = db()
+    conn.execute(
+        "INSERT INTO usage_log(ts,chat_id,kind,in_tok,out_tok) VALUES(?,?,?,?,?)",
+        (datetime.now(TZ).isoformat(), str(chat_id), kind, int(in_tok), int(out_tok)),
+    )
+    conn.commit(); conn.close()
+
+
+def month_stats():
+    conn = db()
+    prefix = datetime.now(TZ).strftime("%Y-%m")
+    sub = conn.execute("SELECT COUNT(*) FROM subscribers WHERE active=1").fetchone()[0]
+    rows = conn.execute(
+        "SELECT kind, COUNT(*), COALESCE(SUM(in_tok),0), COALESCE(SUM(out_tok),0) "
+        "FROM usage_log WHERE ts LIKE ? GROUP BY kind", (prefix + "%",)
+    ).fetchall()
+    conn.close()
+    return sub, rows
+
+
+# ===================== 텍스트 정리 =====================
 def clean_for_telegram(text: str) -> str:
     text = text.replace("**", "").replace("__", "").replace("`", "")
     out = []
     for raw in text.split("\n"):
         line = raw.rstrip()
-        line = re.sub(r"^\s*#{1,6}\s*", "", line)        # # 헤더 기호 제거
-        line = re.sub(r"^\s*>\s?", "", line)              # > 인용 기호 제거
-        line = re.sub(r"^(\s*)[*+]\s+", r"\1· ", line)    # 마크다운 불릿 *,+ → ·
-        line = re.sub(r"\*([^*\n]+)\*", r"\1", line)       # 남은 *기울임* 제거
-        if re.fullmatch(r"\s*(-{3,}|\*{3,}|_{3,})\s*", line):  # --- *** ___ 구분선 제거
+        line = re.sub(r"^\s*#{1,6}\s*", "", line)
+        line = re.sub(r"^\s*>\s?", "", line)
+        line = re.sub(r"^(\s*)[*+]\s+", r"\1· ", line)
+        line = re.sub(r"\*([^*\n]+)\*", r"\1", line)
+        if re.fullmatch(r"\s*(-{3,}|\*{3,}|_{3,})\s*", line):
             continue
-        if re.fullmatch(r"\s*[-·*•]\s*", line):            # 내용 없는 불릿 줄 삭제
+        if re.fullmatch(r"\s*[-·*•]\s*", line):
             continue
         out.append(line)
     text = "\n".join(out)
-    text = re.sub(r"\n{3,}", "\n\n", text)                # 빈 줄 3개 이상 → 2개
-    sun = text.find("☀")                                  # 브리핑 앞 군더더기 문장 제거
-    if sun > 0:
-        text = text[sun:]
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    for marker in ("☀", "🌆"):
+        i = text.find(marker)
+        if i > 0:
+            text = text[i:]
+            break
     return text.strip()
 
 
-# ---------- 날짜/기간 안내문 만들기 ----------
-def build_date_context() -> str:
-    now = datetime.now(TZ)
-    today = now.date()
-    wd = today.weekday()  # 월=0 ... 일=6
+# ===================== 날짜/상품 컨텍스트 =====================
+def build_date_context(pm: bool = False) -> str:
+    today = datetime.now(TZ).date()
+    wd = today.weekday()
     today_str = f"{today} ({WEEKDAY_KR[wd]})"
-
-    if wd == 0:  # 월요일 → 직전 금~일 포함
-        friday = today - timedelta(days=3)
-        return (
-            f"오늘은 {today_str}이다. 직전 영업일은 {friday} (금)이며, "
-            f"주말({today - timedelta(days=2)}~{today - timedelta(days=1)}) 동안의 "
-            f"미국 증시·해외 이슈도 함께 다룬다. 기준일은 '{friday} (금) 마감 기준'으로 표기한다."
-        )
-    else:
-        prev = today - timedelta(days=1)
-        return (
-            f"오늘은 {today_str}이다. 직전 영업일은 {prev} ({WEEKDAY_KR[prev.weekday()]})이며, "
-            f"그날 마감 기준으로 정리한다. 기준일은 '{prev} ({WEEKDAY_KR[prev.weekday()]}) 마감 기준'으로 표기한다."
-        )
+    if pm:
+        return f"오늘은 {today_str}이고 한국 증시 마감 직후다. 오늘 장중에 발생한 이슈를 중심으로 정리한다."
+    if wd == 0:
+        fri = today - timedelta(days=3)
+        return (f"오늘은 {today_str}이다. 직전 영업일은 {fri}(금)이며 주말 미국장·해외 이슈도 함께 다룬다. "
+                f"기준일은 '{fri}(금) 마감 기준'으로 표기한다.")
+    prev = today - timedelta(days=1)
+    return (f"오늘은 {today_str}이다. 직전 영업일은 {prev}({WEEKDAY_KR[prev.weekday()]}) 마감 기준으로 정리한다. "
+            f"기준일은 '{prev}({WEEKDAY_KR[prev.weekday()]}) 마감 기준'으로 표기한다.")
 
 
-# ---------- 집중 상품/세트 안내문 만들기 ----------
 def build_products_block() -> str:
     lines = ["## 현재 집중 상품 (이 목록과 연결되는 이슈만 소재 후보로)"]
     code_to_name = {}
     for p in settings.FOCUS_PRODUCTS:
         lines.append(f"- {p['name']} ({p['code']})")
         code_to_name[p["code"]] = p["name"]
-
     if settings.PRODUCT_SETS:
         lines.append("\n## 연동 상품 세트 (함께 비교 제시)")
         for s in settings.PRODUCT_SETS:
-            names = " + ".join(
-                f"{code_to_name.get(c, c)}({c})" for c in s["members"]
-            )
+            names = " + ".join(f"{code_to_name.get(c, c)}({c})" for c in s["members"])
             lines.append(f"- {names} → {s['note']}")
-
     lines.append(f"\n하루 소재 후보 개수: {settings.CANDIDATE_COUNT}개")
     return "\n".join(lines)
 
 
-# ---------- Claude 호출 (브리핑 생성) ----------
-def generate_brief_sync() -> str:
-    base_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-    system_text = (
-        base_prompt
-        + "\n\n"
-        + build_products_block()
-        + "\n\n## 오늘 날짜 안내\n"
-        + build_date_context()
-    )
+# ===================== Claude 호출 =====================
+def _call(system_text, user_text):
     resp = anthropic_client.messages.create(
         model=settings.MODEL,
         max_tokens=settings.MAX_TOKENS,
         system=system_text,
-        messages=[{"role": "user", "content": "오늘의 KODEX 시황 브리핑을 작성해줘."}],
+        messages=[{"role": "user", "content": user_text}],
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
     )
     parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
-    text = "\n".join(p for p in parts if p).strip()
-    text = clean_for_telegram(text)
-    return text or "브리핑 생성 결과가 비어 있습니다. 잠시 후 다시 시도해 주세요."
+    text = clean_for_telegram("\n".join(p for p in parts if p).strip())
+    in_tok = getattr(resp.usage, "input_tokens", 0) or 0
+    out_tok = getattr(resp.usage, "output_tokens", 0) or 0
+    return (text or "결과가 비어 있습니다. 잠시 후 다시 시도해 주세요."), in_tok, out_tok
 
 
-async def generate_brief() -> str:
-    return await asyncio.to_thread(generate_brief_sync)
+def generate_brief_sync(pm: bool = False):
+    prompt_file = PROMPT_PM if pm else PROMPT_AM
+    system_text = (prompt_file.read_text(encoding="utf-8") + "\n\n"
+                   + build_products_block() + "\n\n## 오늘 날짜 안내\n" + build_date_context(pm))
+    user = "오늘의 KODEX 장 마감 브리핑을 작성해줘." if pm else "오늘의 KODEX 시황 브리핑을 작성해줘."
+    return _call(system_text, user)
 
 
-# ---------- Claude 호출 (숏폼 스크립트 생성) ----------
-def generate_script_sync(user_request: str) -> str:
-    base = SCRIPT_PROMPT_PATH.read_text(encoding="utf-8")
-    system_text = base + "\n\n" + build_products_block()
-    resp = anthropic_client.messages.create(
-        model=settings.MODEL,
-        max_tokens=settings.MAX_TOKENS,
-        system=system_text,
-        messages=[{"role": "user", "content": f"다음 이슈로 숏폼 스크립트를 써줘:\n{user_request}"}],
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-    )
-    parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
-    text = "\n".join(p for p in parts if p).strip()
-    text = clean_for_telegram(text)
-    return text or "스크립트 생성 결과가 비어 있습니다. 잠시 후 다시 시도해 주세요."
+def generate_script_sync(req: str):
+    system_text = SCRIPT_PROMPT.read_text(encoding="utf-8") + "\n\n" + build_products_block()
+    return _call(system_text, f"다음 이슈로 숏폼 스크립트를 써줘:\n{req}")
 
 
-async def generate_script(user_request: str) -> str:
-    return await asyncio.to_thread(generate_script_sync, user_request)
-
-
-# ---------- 긴 메시지 분할 발송 (줄 단위) ----------
+# ===================== 발송 =====================
 async def send_long(bot, chat_id, text: str):
     if len(text) <= TG_LIMIT:
-        await bot.send_message(chat_id=chat_id, text=text)
-        return
+        await bot.send_message(chat_id=chat_id, text=text); return
     chunk = ""
     for line in text.split("\n"):
         if len(chunk) + len(line) + 1 > TG_LIMIT:
@@ -175,108 +215,159 @@ async def send_long(bot, chat_id, text: str):
         await bot.send_message(chat_id=chat_id, text=chunk)
 
 
-# ---------- 명령 핸들러 ----------
+WELCOME = (
+    "KODEX 시황 뉴스봇입니다. 구독이 시작되었어요!\n\n"
+    "[주요 기능]\n"
+    "1. 오전 9시 브리핑: 밤사이 미국장 + 전날 마감\n"
+    "2. 오후 3:30 브리핑: 오늘 한국장 마감 + 장중 이벤트·소재 후보\n"
+    "3. 스크립트 작성 (사용법: /script 주요이슈 + 원하는 ETF 상품)\n\n"
+    "[즉시 명령]\n"
+    "· /brief : 지금 오전형 브리핑 받기\n"
+    "· /pm : 지금 오후형(장중) 브리핑 받기\n"
+    "· /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로\n"
+    "· /stop : 자동 발송 구독 해지\n\n"
+    "평일 오전 9시·오후 3:30에 자동으로 브리핑을 보내드립니다."
+)
+
+
+# ===================== 명령 핸들러 =====================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "KODEX 시황 뉴스봇입니다.\n"
-        "· /brief : 지금 즉시 시황 브리핑 받아보기\n"
-        "· /script <이슈와 상품> : 숏폼 스크립트 만들기\n"
-        "   예) /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로\n"
-        "· /chatid : 이 채팅방의 ID 확인\n"
-        "평일 오전 9시에 자동으로 브리핑을 보냅니다."
-    )
+    chat = update.effective_chat
+    name = (chat.title or " ".join(filter(None, [chat.first_name, chat.last_name])) or chat.username or "")
+    add_subscriber(chat.id, name)
+    await update.message.reply_text(WELCOME)
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remove_subscriber(update.effective_chat.id)
+    await update.message.reply_text("자동 발송 구독을 해지했어요. 다시 받으려면 /start 를 눌러주세요.")
 
 
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"이 채팅 ID: {update.effective_chat.id}")
 
 
-# ---------- 채널/그룹에 봇이 추가될 때 ID 안내 ----------
-async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    new_status = update.my_chat_member.new_chat_member.status
-    if new_status in ("member", "administrator"):
-        log.info("봇이 채팅에 추가됨: id=%s type=%s title=%s",
-                 chat.id, chat.type, getattr(chat, "title", ""))
-        msg = (
-            f"봇이 추가되었습니다.\n"
-            f"이 채팅 ID: {chat.id}\n"
-            f"(자동 9시 브리핑을 이 채널/그룹으로 받으려면, "
-            f"Railway의 TARGET_CHAT_ID 값을 위 ID로 설정하세요.)"
-        )
-        try:
-            await context.bot.send_message(chat_id=chat.id, text=msg)
-        except Exception:
-            # 채널 등 메시지 전송이 막힌 경우 로그로만 남김 (위 log.info 참고)
-            pass
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_CHAT_ID and str(update.effective_chat.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("이 명령은 운영자만 사용할 수 있어요.")
+        return
+    sub, rows = month_stats()
+    total_in = sum(r[2] for r in rows)
+    total_out = sum(r[3] for r in rows)
+    cost = (total_in / 1_000_000 * settings.PRICE_INPUT_PER_MTOK
+            + total_out / 1_000_000 * settings.PRICE_OUTPUT_PER_MTOK)
+    month = datetime.now(TZ).strftime("%Y-%m")
+    lines = [f"📊 {month} 사용 현황 (청구 참고용)", f"· 활성 구독자: {sub}명", ""]
+    if rows:
+        for kind, cnt, itok, otok in rows:
+            lines.append(f"· {kind}: {cnt}회 (입력 {itok:,} / 출력 {otok:,} 토큰)")
+    else:
+        lines.append("· 이번 달 호출 기록 없음")
+    lines += ["", f"· 추정 토큰: 입력 {total_in:,} / 출력 {total_out:,}",
+              f"· 추정 API 비용: 약 ${cost:,.2f} (참고용)", "",
+              "정확한 청구액은 Anthropic Console Usage 및 Railway Usage 기준으로 확인하세요."]
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    request = " ".join(context.args).strip()
-    if not request:
+    req = " ".join(context.args).strip()
+    if not req:
         await update.message.reply_text(
             "사용법: /script 다음에 이슈와 원하는 상품을 적어주세요.\n"
-            "예) /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로 숏폼"
-        )
+            "예) /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로 숏폼")
         return
     await update.message.reply_text("스크립트를 작성 중입니다… (웹 검색 포함, 30초~1분 소요)")
     try:
-        text = await generate_script(request)
+        text, itok, otok = await asyncio.to_thread(generate_script_sync, req)
+        log_usage(update.effective_chat.id, "script", itok, otok)
         await send_long(context.bot, update.effective_chat.id, text)
     except Exception as e:
         log.exception("script failed")
         await update.message.reply_text(f"스크립트 생성 중 오류가 발생했습니다: {e}")
 
 
-async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("브리핑을 작성 중입니다… (웹 검색 포함, 30초~1분 소요)")
+async def _brief_cmd(update, context, pm):
+    label = "오후 장중" if pm else "오전"
+    await update.message.reply_text(f"{label} 브리핑을 작성 중입니다… (웹 검색 포함, 30초~1분 소요)")
     try:
-        text = await generate_brief()
+        text, itok, otok = await asyncio.to_thread(generate_brief_sync, pm)
+        log_usage(update.effective_chat.id, "pm" if pm else "brief", itok, otok)
         await send_long(context.bot, update.effective_chat.id, text)
     except Exception as e:
         log.exception("brief failed")
         await update.message.reply_text(f"브리핑 생성 중 오류가 발생했습니다: {e}")
 
 
-# ---------- 매일 자동 발송 ----------
-async def daily_brief_job(context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now(TZ).date()
-    if today.weekday() >= 5:  # 토(5)·일(6)은 발송 안 함
-        log.info("주말이므로 자동 발송 건너뜀")
-        return
-    if not TARGET_CHAT_ID:
-        log.warning("TARGET_CHAT_ID 미설정 → 자동 발송 불가")
-        return
-    try:
-        text = await generate_brief()
-        await send_long(context.bot, TARGET_CHAT_ID, text)
-        log.info("일일 브리핑 발송 완료")
-    except Exception as e:
-        log.exception("daily brief failed")
+async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _brief_cmd(update, context, pm=False)
+
+
+async def cmd_pm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _brief_cmd(update, context, pm=True)
+
+
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    status = update.my_chat_member.new_chat_member.status
+    if status in ("member", "administrator"):
+        log.info("봇이 채팅에 추가됨: id=%s type=%s title=%s", chat.id, chat.type, getattr(chat, "title", ""))
         try:
-            await context.bot.send_message(
-                chat_id=TARGET_CHAT_ID,
-                text=f"⚠️ 자동 브리핑 생성 중 오류: {e}",
-            )
+            await context.bot.send_message(chat_id=chat.id, text=WELCOME)
+            add_subscriber(chat.id, getattr(chat, "title", "") or "")
         except Exception:
             pass
+
+
+# ===================== 자동 발송 =====================
+async def broadcast(context, pm):
+    today = datetime.now(TZ).date()
+    if today.weekday() >= 5:
+        log.info("주말이므로 자동 발송 건너뜀"); return
+    subs = active_subscribers()
+    if not subs:
+        log.warning("활성 구독자 없음 → 자동 발송 대상 없음"); return
+    try:
+        text, itok, otok = await asyncio.to_thread(generate_brief_sync, pm)
+    except Exception as e:
+        log.exception("auto brief gen failed"); return
+    log_usage("AUTO", "pm" if pm else "brief", itok, otok)
+    sent = 0
+    for cid in subs:
+        try:
+            await send_long(context.bot, cid, text); sent += 1
+        except Exception:
+            log.warning("발송 실패(차단/탈퇴 추정) chat_id=%s", cid)
+            remove_subscriber(cid)
+    log.info("자동 %s 브리핑 발송 완료: %d명", "오후" if pm else "오전", sent)
+
+
+async def job_am(context: ContextTypes.DEFAULT_TYPE):
+    await broadcast(context, pm=False)
+
+
+async def job_pm(context: ContextTypes.DEFAULT_TYPE):
+    await broadcast(context, pm=True)
 
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("pm", cmd_pm))
     app.add_handler(CommandHandler("script", cmd_script))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
-    app.job_queue.run_daily(
-        daily_brief_job,
-        time=time(hour=settings.SCHEDULE_HOUR, minute=settings.SCHEDULE_MINUTE, tzinfo=TZ),
-    )
+    app.job_queue.run_daily(job_am, time=time(
+        hour=settings.SCHEDULE_HOUR, minute=settings.SCHEDULE_MINUTE, tzinfo=TZ))
+    app.job_queue.run_daily(job_pm, time=time(
+        hour=settings.SCHEDULE_PM_HOUR, minute=settings.SCHEDULE_PM_MINUTE, tzinfo=TZ))
 
-    log.info("봇 시작 (매일 %02d:%02d %s 발송 예약)",
-             settings.SCHEDULE_HOUR, settings.SCHEDULE_MINUTE, settings.TIMEZONE)
+    log.info("봇 시작 (오전 %02d:%02d / 오후 %02d:%02d %s)",
+             settings.SCHEDULE_HOUR, settings.SCHEDULE_MINUTE,
+             settings.SCHEDULE_PM_HOUR, settings.SCHEDULE_PM_MINUTE, settings.TIMEZONE)
     app.run_polling()
 
 
