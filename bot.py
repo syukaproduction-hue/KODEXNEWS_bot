@@ -16,7 +16,12 @@ from pathlib import Path
 import pytz
 from anthropic import Anthropic
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ChatMemberHandler,
+    ContextTypes,
+)
 
 import settings
 
@@ -186,6 +191,26 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"이 채팅 ID: {update.effective_chat.id}")
 
 
+# ---------- 채널/그룹에 봇이 추가될 때 ID 안내 ----------
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    new_status = update.my_chat_member.new_chat_member.status
+    if new_status in ("member", "administrator"):
+        log.info("봇이 채팅에 추가됨: id=%s type=%s title=%s",
+                 chat.id, chat.type, getattr(chat, "title", ""))
+        msg = (
+            f"봇이 추가되었습니다.\n"
+            f"이 채팅 ID: {chat.id}\n"
+            f"(자동 9시 브리핑을 이 채널/그룹으로 받으려면, "
+            f"Railway의 TARGET_CHAT_ID 값을 위 ID로 설정하세요.)"
+        )
+        try:
+            await context.bot.send_message(chat_id=chat.id, text=msg)
+        except Exception:
+            # 채널 등 메시지 전송이 막힌 경우 로그로만 남김 (위 log.info 참고)
+            pass
+
+
 async def cmd_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
     request = " ".join(context.args).strip()
     if not request:
@@ -243,6 +268,7 @@ def main():
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("script", cmd_script))
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
     app.job_queue.run_daily(
         daily_brief_job,
