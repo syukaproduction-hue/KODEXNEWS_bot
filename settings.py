@@ -29,7 +29,15 @@ MODEL = "claude-sonnet-4-6"
 # 5) 매일 발송 시각 (24시간 표기, 한국시간 기준)
 SCHEDULE_HOUR = 9
 SCHEDULE_MINUTE = 0
+# 오후 장 마감 브리핑 시각 (한국거래소 마감 15:30)
+SCHEDULE_PM_HOUR = 15
+SCHEDULE_PM_MINUTE = 30
 TIMEZONE = "Asia/Seoul"
+
+# 5-1) 추정 비용 계산용 단가 (USD per 1M tokens). 참고용이며 실제 청구는 Anthropic Console 기준.
+#      최신 단가: https://www.anthropic.com/pricing
+PRICE_INPUT_PER_MTOK = 3.0
+PRICE_OUTPUT_PER_MTOK = 15.0
 
 # 6) 응답 최대 길이 (토큰). 보통 그대로 두면 됩니다.
 MAX_TOKENS = 4000
