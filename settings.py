@@ -6,17 +6,16 @@
 # 1) 현재 집중 상품 (이슈와 매칭할 KODEX 라인업)
 #    name = 상품명, code = 종목코드.  줄을 추가/삭제하면 됩니다.
 FOCUS_PRODUCTS = [
-    {"name": "KODEX 미국AI반도체TOP3플러스", "code": "0151S0"},
-    {"name": "KODEX 미국성장커버드콜액티브", "code": "0144L0"},
-    {"name": "KODEX 미국배당커버드콜액티브", "code": "441640"},
-    {"name": "KODEX AI전력핵심설비",        "code": "487240"},
+    {"name": "KODEX 현대차로보틱스밸류체인TOP3플러스", "code": "0204D0"},
+    {"name": "KODEX 200IT TR", "code": "363580"},
+    {"name": "KODEX 미국우주항공 ", "code": "0167Z0"},
 ]
 
 # 2) 연동 상품 세트 (함께 제안하면 자연스러운 조합)
 #    members = 위 종목코드들, note = 어떻게 묶을지 설명.
 PRODUCT_SETS = [
-    {"members": ["0144L0", "441640"],
-     "note": "나스닥 성장 추종(성장커버드콜) vs S&P500 배당 안정(배당커버드콜) 비교형"},
+    {"members": ["", ""],
+     "note": ""},
 ]
 
 # 3) 하루 소재 후보 개수
