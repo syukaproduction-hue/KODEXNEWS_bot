@@ -8,15 +8,12 @@
 FOCUS_PRODUCTS = [
     {"name": "KODEX 현대차로보틱스밸류체인TOP3플러스", "code": "0204D0"},
     {"name": "KODEX 200IT TR", "code": "363580"},
-    {"name": "KODEX 미국우주항공 ", "code": "0167Z0"},
+    {"name": "KODEX 미국우주항공", "code": "0167Z0"},
 ]
 
-# 2) 연동 상품 세트 (함께 제안하면 자연스러운 조합)
+# 2) 연동 상품 세트 (함께 제안하면 자연스러운 조합) — 없으면 [] 로 비워둡니다.
 #    members = 위 종목코드들, note = 어떻게 묶을지 설명.
-PRODUCT_SETS = [
-    {"members": ["", ""],
-     "note": ""},
-]
+PRODUCT_SETS = []
 
 # 3) 하루 소재 후보 개수
 CANDIDATE_COUNT = 3
