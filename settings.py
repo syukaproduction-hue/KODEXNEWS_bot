@@ -18,22 +18,22 @@ PRODUCT_SETS = []
 # 3) 하루 소재 후보 개수
 CANDIDATE_COUNT = 3
 
-# 4) 사용 모델  (품질을 높이고 싶으면 "claude-opus-4-8" 로 변경)
+# 4) 사용 모델  (정리 품질이 더 좋은 상위 모델)
 #    모델/요금 최신정보: https://docs.claude.com/en/docs/about-claude/models
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-opus-4-8"
 
 # 5) 매일 발송 시각 (24시간 표기, 한국시간 기준)
 SCHEDULE_HOUR = 9
 SCHEDULE_MINUTE = 0
-# 오후 장 마감 브리핑 시각 (한국거래소 마감 15:30)
+# 오후 장 마감 브리핑 시각 (장 마감 후 데이터가 올라올 시간을 두어 15:40)
 SCHEDULE_PM_HOUR = 15
-SCHEDULE_PM_MINUTE = 30
+SCHEDULE_PM_MINUTE = 40
 TIMEZONE = "Asia/Seoul"
 
 # 5-1) 추정 비용 계산용 단가 (USD per 1M tokens). 참고용이며 실제 청구는 Anthropic Console 기준.
-#      최신 단가: https://www.anthropic.com/pricing
-PRICE_INPUT_PER_MTOK = 3.0
-PRICE_OUTPUT_PER_MTOK = 15.0
+#      최신 단가: https://www.anthropic.com/pricing  (모델 변경 시 이 값도 함께 맞추세요)
+PRICE_INPUT_PER_MTOK = 15.0
+PRICE_OUTPUT_PER_MTOK = 75.0
 
 # 6) 응답 최대 길이 (토큰). 보통 그대로 두면 됩니다.
 MAX_TOKENS = 4000
