@@ -13,6 +13,7 @@ KODEX 시황 뉴스봇
 
 import os
 import re
+import json
 import asyncio
 import logging
 import sqlite3
@@ -20,6 +21,7 @@ from datetime import datetime, timedelta, time
 from pathlib import Path
 
 import pytz
+import requests
 from anthropic import Anthropic
 from telegram import Update
 from telegram.ext import (
@@ -117,6 +119,48 @@ def month_stats():
     return sub, rows
 
 
+# ===================== 코스피 종가 조회 (네이버금융) =====================
+def fetch_kospi_close():
+    """네이버금융에서 코스피 현재가·등락을 읽어 한 줄 문장으로 반환. 실패하면 None."""
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
+    endpoints = [
+        "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI",
+        "https://m.stock.naver.com/api/index/KOSPI/basic",
+    ]
+    for url in endpoints:
+        try:
+            r = requests.get(url, headers=headers, timeout=8)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            # 두 엔드포인트의 응답 구조가 달라 모두 대응
+            node = data
+            if isinstance(data, dict) and "datas" in data:
+                node = data["datas"][0]
+            close = (node.get("closePrice") or node.get("nv") or node.get("now"))
+            change = (node.get("compareToPreviousClosePrice") or node.get("cv"))
+            rate = (node.get("fluctuationsRatio") or node.get("cr"))
+            sign = node.get("compareToPreviousPrice")
+            if isinstance(sign, dict):
+                sign = sign.get("text", "")
+            if not close:
+                continue
+            close_s = str(close).replace(",", "")
+            change_s = str(change).replace(",", "") if change is not None else ""
+            arrow = ""
+            try:
+                cv = float(change_s)
+                arrow = "▲" if cv > 0 else ("▼" if cv < 0 else "보합")
+                change_s = f"{abs(cv):,.2f}"
+            except Exception:
+                pass
+            rate_s = f" ({rate}%)" if rate not in (None, "") else ""
+            return f"코스피 {float(close_s):,.2f} {arrow}{change_s}{rate_s} (출처: 네이버금융, 한국거래소 기준)"
+        except Exception:
+            continue
+    return None
+
+
 # ===================== 텍스트 정리 =====================
 def clean_for_telegram(text: str) -> str:
     text = text.replace("**", "").replace("__", "").replace("`", "")
@@ -134,12 +178,32 @@ def clean_for_telegram(text: str) -> str:
         out.append(line)
     text = "\n".join(out)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    text = _join_broken_lines(text)
     for marker in ("☀", "🌆"):
         i = text.find(marker)
         if i > 0:
             text = text[i:]
             break
     return text.strip()
+
+
+# 문장 중간에서 끊긴 줄을 자연스럽게 이어붙인다.
+def _join_broken_lines(text: str) -> str:
+    lines = text.split("\n")
+    # 새 블록의 시작으로 볼 패턴: 항목기호(·-•), 번호(1.), 이모지/대괄호 머리말, 빈 줄
+    starts = re.compile(r"^\s*(·|-|•|\d+\.|\[|☀|🌆|📈|📉|🎯|🔔|🗂|🏢|🚩|🌙|⚠)")
+    # 문장이 끝났다고 볼 종결: 마침표/물음표/느낌표/콜론/따옴표/괄호 등
+    ends_ok = re.compile(r'[.!?:;,)\]"”』」\d]$')
+    result = []
+    for ln in lines:
+        s = ln.rstrip()
+        if (result and s.strip() and result[-1].strip()
+                and not starts.match(s) and not ends_ok.search(result[-1].rstrip())):
+            # 이전 줄이 문장 중간에서 끊겼고, 이 줄이 새 항목이 아니면 이어붙임
+            result[-1] = result[-1].rstrip() + " " + s.strip()
+        else:
+            result.append(s)
+    return "\n".join(result)
 
 
 # ===================== 날짜/상품 컨텍스트 =====================
@@ -193,6 +257,14 @@ def generate_brief_sync(pm: bool = False):
     prompt_file = PROMPT_PM if pm else PROMPT_AM
     system_text = (prompt_file.read_text(encoding="utf-8") + "\n\n"
                    + build_products_block() + "\n\n## 오늘 날짜 안내\n" + build_date_context(pm))
+    if pm:
+        kospi = fetch_kospi_close()
+        if kospi:
+            system_text += ("\n\n## 코스피 마감 (확정 데이터 — 이 값을 '오늘 코스피 마감' 첫 줄에 그대로 쓸 것)\n"
+                            + kospi)
+        else:
+            system_text += ("\n\n## 코스피 마감\n확정 종가 데이터를 가져오지 못했다. "
+                            "추측하지 말고 '오늘 코스피 마감' 항목을 통째로 생략한다.")
     user = "오늘의 KODEX 장 마감 브리핑을 작성해줘." if pm else "오늘의 KODEX 시황 브리핑을 작성해줘."
     return _call(system_text, user)
 
