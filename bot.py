@@ -151,11 +151,11 @@ def build_date_context(pm: bool = False) -> str:
         return f"오늘은 {today_str}이고 한국 증시 마감 직후다. 오늘 장중에 발생한 이슈를 중심으로 정리한다."
     if wd == 0:
         fri = today - timedelta(days=3)
-        return (f"오늘은 {today_str}이다. 직전 영업일은 {fri}(금)이며 주말 미국장·해외 이슈도 함께 다룬다. "
-                f"기준일은 '{fri}(금) 마감 기준'으로 표기한다.")
+        return (f"오늘은 {today_str} 아침이다. 직전 영업일은 {fri}(금)이며 주말 미국장·해외 이슈도 함께 다룬다. "
+                f"헤더는 '{today} ({WEEKDAY_KR[wd]}) 아침 · 미국 시장 정리'로 표기한다. '마감 기준'이라는 표현은 쓰지 않는다.")
     prev = today - timedelta(days=1)
-    return (f"오늘은 {today_str}이다. 직전 영업일은 {prev}({WEEKDAY_KR[prev.weekday()]}) 마감 기준으로 정리한다. "
-            f"기준일은 '{prev}({WEEKDAY_KR[prev.weekday()]}) 마감 기준'으로 표기한다.")
+    return (f"오늘은 {today_str} 아침이다. 밤사이 미국 증시와 직전 한국장({prev}, {WEEKDAY_KR[prev.weekday()]}) 흐름을 정리한다. "
+            f"헤더는 '{today} ({WEEKDAY_KR[wd]}) 아침 · 미국 시장 정리'로 표기한다. '마감 기준'이라는 표현은 쓰지 않는다.")
 
 
 def build_products_block() -> str:
