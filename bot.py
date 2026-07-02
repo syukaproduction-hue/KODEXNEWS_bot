@@ -51,6 +51,7 @@ BASE = Path(__file__).parent
 PROMPT_AM = BASE / "briefing_prompt.md"
 PROMPT_PM = BASE / "briefing_pm_prompt.md"
 SCRIPT_PROMPT = BASE / "script_prompt.md"
+BRIEF_PROMPT = BASE / "brief_prompt.md"
 
 # DB 위치: Railway 볼륨을 /data 에 연결하면 영구 보존됨. 없으면 로컬 파일로 동작.
 DB_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -274,6 +275,11 @@ def generate_script_sync(req: str):
     return _call(system_text, f"다음 이슈로 숏폼 스크립트를 써줘:\n{req}")
 
 
+def generate_plan_sync(req: str):
+    system_text = BRIEF_PROMPT.read_text(encoding="utf-8") + "\n\n" + build_products_block()
+    return _call(system_text, f"다음 상품/이슈로 숏폼 제작 브리프를 작성해줘:\n{req}")
+
+
 # ===================== 발송 =====================
 async def send_long(bot, chat_id, text: str):
     if len(text) <= TG_LIMIT:
@@ -297,6 +303,7 @@ WELCOME = (
     "→ 자동 브리핑은 공식 채널에 평일 오전·오후로 올라옵니다. 채널을 구독해 두시면 됩니다.\n\n"
     "[직접 명령 — 여기(1:1) 또는 팀 그룹방에서]\n"
     "채널에서는 명령을 쓸 수 없어요. 아래 명령은 봇과의 1:1 대화나 봇을 추가한 그룹방에서 사용하세요.\n"
+    "· /plan KODEX AI전력핵심설비  (제작 브리프: 스토리·컴플·톤 기획)\n"
     "· /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로  (숏폼 스크립트 작성)\n"
     "· /brief  (지금 오전형 브리핑 받기)\n"
     "· /pm  (지금 오후형 장중 브리핑 받기)\n"
@@ -355,6 +362,25 @@ async def cmd_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.exception("script failed")
         await update.message.reply_text(f"스크립트 생성 중 오류가 발생했습니다: {e}")
+
+
+async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    req = " ".join(context.args).strip()
+    if not req:
+        await update.message.reply_text(
+            "사용법: /plan 다음에 밀고 싶은 상품(과 오늘 이슈)을 적어주세요.\n"
+            "예) /plan KODEX AI전력핵심설비\n"
+            "→ 스토리 앵글·영상 방향·컴플 체크·톤 가이드를 기획해 드립니다. "
+            "마음에 드는 앵글은 /script 로 완성 스크립트를 만드세요.")
+        return
+    await update.message.reply_text("제작 브리프를 작성 중입니다… (웹 검색 포함, 30초~1분 소요)")
+    try:
+        text, itok, otok = await asyncio.to_thread(generate_plan_sync, req)
+        log_usage(update.effective_chat.id, "plan", itok, otok)
+        await send_long(context.bot, update.effective_chat.id, text)
+    except Exception as e:
+        log.exception("plan failed")
+        await update.message.reply_text(f"제작 브리프 생성 중 오류가 발생했습니다: {e}")
 
 
 async def _brief_cmd(update, context, pm):
@@ -440,6 +466,7 @@ def main():
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("pm", cmd_pm))
     app.add_handler(CommandHandler("script", cmd_script))
+    app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
     app.job_queue.run_daily(job_am, time=time(
