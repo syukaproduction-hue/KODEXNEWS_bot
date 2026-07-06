@@ -80,6 +80,8 @@ def db():
         kind TEXT, source TEXT, title TEXT, body TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS plans(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS scripts(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
     return conn
 
 
@@ -142,6 +144,19 @@ def save_plan(request, body):
         conn.commit(); conn.close()
     except Exception:
         log.exception("save_plan failed")
+
+
+def save_script(request, body):
+    # 완성 스크립트(/script 결과)를 웹 화면용으로 저장. 웹판과 동일 스키마.
+    try:
+        conn = db()
+        conn.execute(
+            "INSERT INTO scripts(ts,request,body) VALUES(?,?,?)",
+            (datetime.now(TZ).isoformat(), (request or "")[:1000], body),
+        )
+        conn.commit(); conn.close()
+    except Exception:
+        log.exception("save_script failed")
 
 
 def month_stats():
@@ -331,6 +346,13 @@ def web_generate_plan(req: str):
     return text
 
 
+def web_generate_script(req: str):
+    # 웹 '완성 스크립트' 화면에서 호출.
+    text, itok, otok = generate_script_sync(req)
+    log_usage("WEB", "script", itok, otok)
+    return text
+
+
 # ===================== 발송 =====================
 async def send_long(bot, chat_id, text: str):
     if len(text) <= TG_LIMIT:
@@ -431,6 +453,7 @@ async def cmd_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text, itok, otok = await asyncio.to_thread(generate_script_sync, req)
         log_usage(update.effective_chat.id, "script", itok, otok)
+        save_script(req, text)
         await send_long(context.bot, update.effective_chat.id, text)
     except Exception as e:
         log.exception("script failed")
@@ -539,7 +562,7 @@ def start_web():
     try:
         import uvicorn
         import web
-        web.configure(DB_PATH, web_generate_plan)
+        web.configure(DB_PATH, web_generate_plan, web_generate_script)
         port = int(os.environ.get("PORT", "8080"))
         config = uvicorn.Config(web.app, host="0.0.0.0", port=port, log_level="warning")
         log.info("웹 서버 시작: 0.0.0.0:%s", port)
