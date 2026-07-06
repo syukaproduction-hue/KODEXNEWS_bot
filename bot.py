@@ -78,6 +78,8 @@ def db():
     conn.execute("""CREATE TABLE IF NOT EXISTS briefings(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, ymd TEXT,
         kind TEXT, source TEXT, title TEXT, body TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS plans(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
     return conn
 
 
@@ -127,6 +129,19 @@ def save_briefing(kind, source, text):
         conn.commit(); conn.close()
     except Exception:
         log.exception("save_briefing failed")
+
+
+def save_plan(request, body):
+    # 제작 브리프(/plan 결과)를 웹 '제작 브리프' 화면용으로 저장. 웹판과 동일 스키마.
+    try:
+        conn = db()
+        conn.execute(
+            "INSERT INTO plans(ts,request,body) VALUES(?,?,?)",
+            (datetime.now(TZ).isoformat(), (request or "")[:1000], body),
+        )
+        conn.commit(); conn.close()
+    except Exception:
+        log.exception("save_plan failed")
 
 
 def month_stats():
@@ -309,6 +324,13 @@ def generate_plan_sync(req: str):
     return _call(system_text, f"다음 상품/이슈로 숏폼 제작 브리프를 작성해줘:\n{req}")
 
 
+def web_generate_plan(req: str):
+    # 웹 '제작 브리프' 화면에서 호출. 텍스트만 반환하고 사용량은 여기서 기록한다.
+    text, itok, otok = generate_plan_sync(req)
+    log_usage("WEB", "plan", itok, otok)
+    return text
+
+
 # ===================== 발송 =====================
 async def send_long(bot, chat_id, text: str):
     if len(text) <= TG_LIMIT:
@@ -356,7 +378,6 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_marketdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 운영자 전용: 공개 데이터(네이버금융) 조회가 정상인지 확인하는 진단 명령.
-    # 아직 브리핑에는 넣지 않고, 값이 맞는지 눈으로 확인하는 용도.
     if ADMIN_CHAT_ID and str(update.effective_chat.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("이 명령은 운영자만 사용할 수 있어요.")
         return
@@ -429,6 +450,7 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text, itok, otok = await asyncio.to_thread(generate_plan_sync, req)
         log_usage(update.effective_chat.id, "plan", itok, otok)
+        save_plan(req, text)
         await send_long(context.bot, update.effective_chat.id, text)
     except Exception as e:
         log.exception("plan failed")
@@ -512,15 +534,15 @@ async def job_pm(context: ContextTypes.DEFAULT_TYPE):
 
 
 def start_web():
-    # 웹 아카이브 서버를 백그라운드 스레드에서 실행한다.
+    # 웹(홈/아카이브/제작 브리프)을 백그라운드 스레드에서 실행한다.
     # import를 여기서 해서, fastapi/uvicorn 미설치나 web.py 누락 시에도 봇은 계속 돈다.
     try:
         import uvicorn
         import web
-        web.configure(DB_PATH)
+        web.configure(DB_PATH, web_generate_plan)
         port = int(os.environ.get("PORT", "8080"))
         config = uvicorn.Config(web.app, host="0.0.0.0", port=port, log_level="warning")
-        log.info("웹 아카이브 서버 시작: 0.0.0.0:%s", port)
+        log.info("웹 서버 시작: 0.0.0.0:%s", port)
         uvicorn.Server(config).run()  # 비 메인 스레드 → uvicorn이 시그널 핸들러를 설치하지 않음
     except Exception:
         log.exception("웹 서버를 시작하지 못했습니다 — 봇은 계속 실행됩니다")
