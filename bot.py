@@ -17,6 +17,7 @@ import json
 import asyncio
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timedelta, time
 from pathlib import Path
 
@@ -74,6 +75,9 @@ def db():
         chat_id TEXT PRIMARY KEY, name TEXT, joined_at TEXT, active INTEGER DEFAULT 1)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS usage_log(
         ts TEXT, chat_id TEXT, kind TEXT, in_tok INTEGER, out_tok INTEGER)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS briefings(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, ymd TEXT,
+        kind TEXT, source TEXT, title TEXT, body TEXT)""")
     return conn
 
 
@@ -107,6 +111,22 @@ def log_usage(chat_id, kind, in_tok, out_tok):
         (datetime.now(TZ).isoformat(), str(chat_id), kind, int(in_tok), int(out_tok)),
     )
     conn.commit(); conn.close()
+
+
+def save_briefing(kind, source, text):
+    # 생성된 브리핑을 아카이브용으로 저장. kind='am'/'pm', source='auto'/'manual'.
+    # 저장 실패가 브리핑 발송을 막으면 안 되므로 여기서 예외를 삼킨다.
+    try:
+        conn = db()
+        now = datetime.now(TZ)
+        title = (text.split("\n", 1)[0] or "").strip()[:200]
+        conn.execute(
+            "INSERT INTO briefings(ts,ymd,kind,source,title,body) VALUES(?,?,?,?,?,?)",
+            (now.isoformat(), now.strftime("%Y-%m-%d"), kind, source, title, text),
+        )
+        conn.commit(); conn.close()
+    except Exception:
+        log.exception("save_briefing failed")
 
 
 def month_stats():
@@ -421,6 +441,7 @@ async def _brief_cmd(update, context, pm):
     try:
         text, itok, otok = await asyncio.to_thread(generate_brief_sync, pm)
         log_usage(update.effective_chat.id, "pm" if pm else "brief", itok, otok)
+        save_briefing("pm" if pm else "am", "manual", text)
         await send_long(context.bot, update.effective_chat.id, text)
     except Exception as e:
         log.exception("brief failed")
@@ -467,6 +488,7 @@ async def broadcast(context, pm):
     except Exception:
         log.exception("auto brief gen failed"); return
     log_usage("AUTO", "pm" if pm else "brief", itok, otok)
+    save_briefing("pm" if pm else "am", "auto", text)
     try:
         await send_long(context.bot, TARGET_CHANNEL_ID, text)
         log.info("자동 %s 브리핑 채널 발송 완료", "오후" if pm else "오전")
@@ -489,7 +511,25 @@ async def job_pm(context: ContextTypes.DEFAULT_TYPE):
     await broadcast(context, pm=True)
 
 
+def start_web():
+    # 웹 아카이브 서버를 백그라운드 스레드에서 실행한다.
+    # import를 여기서 해서, fastapi/uvicorn 미설치나 web.py 누락 시에도 봇은 계속 돈다.
+    try:
+        import uvicorn
+        import web
+        web.configure(DB_PATH)
+        port = int(os.environ.get("PORT", "8080"))
+        config = uvicorn.Config(web.app, host="0.0.0.0", port=port, log_level="warning")
+        log.info("웹 아카이브 서버 시작: 0.0.0.0:%s", port)
+        uvicorn.Server(config).run()  # 비 메인 스레드 → uvicorn이 시그널 핸들러를 설치하지 않음
+    except Exception:
+        log.exception("웹 서버를 시작하지 못했습니다 — 봇은 계속 실행됩니다")
+
+
 def main():
+    if os.environ.get("ENABLE_WEB", "1") != "0":
+        threading.Thread(target=start_web, daemon=True).start()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
