@@ -267,6 +267,14 @@ def generate_brief_sync(pm: bool = False):
         else:
             system_text += ("\n\n## 코스피 마감\n확정 종가 데이터를 가져오지 못했다. "
                             "추측하지 말고 '오늘 코스피 마감' 항목을 통째로 생략한다.")
+    else:
+        notable = market_data.notable_focus_products()
+        if notable:
+            system_text += (
+                "\n\n## 어제 눈에 띈 집중 상품 (공개 데이터 · 네이버금융 기준)\n"
+                "아래는 직전 영업일 집중 상품 시세다. '📊 어제 집중 상품 움직임' 항목과 "
+                "소재 후보 판단에 참고한다. 출처는 '네이버금융 시세'로 표기한다. "
+                "집중 상품을 임의로 바꾸거나 투자권유로 쓰지 않는다.\n" + notable)
     user = "오늘의 KODEX 장 마감 브리핑을 작성해줘." if pm else "오늘의 KODEX 시황 브리핑을 작성해줘."
     return _call(system_text, user)
 
