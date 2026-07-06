@@ -6,9 +6,9 @@
 # 1) 현재 집중 상품 (이슈와 매칭할 KODEX 라인업)
 #    name = 상품명, code = 종목코드.  줄을 추가/삭제하면 됩니다.
 FOCUS_PRODUCTS = [
-    {"name": "KODEX 현대차로보틱스밸류체인TOP3플러스", "code": "0204D0"},
-    {"name": "KODEX 200IT TR", "code": "363580"},
-    {"name": "KODEX 미국우주항공", "code": "0167Z0"},
+    {"name": "KODEX 삼성전자SK하이닉스채권혼합50", "code": "0177N0"},
+    {"name": "KODEX 전고체배터리ESS TOP2플러스", "code": "0209D0"},
+    {"name": " KODEX AI반도체TOP2플러스", "code": "395160"},
 ]
 
 # 2) 연동 상품 세트 (함께 제안하면 자연스러운 조합) — 없으면 [] 로 비워둡니다.
