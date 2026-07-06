@@ -1,7 +1,6 @@
 """
-KODEX 시황 브리핑 — 웹 아카이브 + 제작 브리프 (통합 홈)
-- 하나의 홈(/)에서 세 메뉴로: 아카이브(/archive), 제작 브리프(/plan), 데이터(/data, 준비중).
-- bot.py와 같은 SQLite DB를 공유한다. DB 경로와 '브리프 생성 함수'를 configure()로 주입받는다.
+KODEX 시황 브리핑 — 통합 웹 (홈 / 텔레그램 봇 안내 / 아카이브 / 제작 브리프 / 완성 스크립트 / 데이터)
+- bot.py와 같은 SQLite DB를 공유한다. DB 경로와 생성 함수(brief/script)를 configure()로 주입받는다.
 - 공개 페이지지만 noindex/robots로 검색엔진 노출은 막는다.
 """
 
@@ -17,19 +16,23 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
-DB_PATH = None      # bot.py가 주입
-PLAN_FN = None      # bot.py가 주입 (요청문 -> 브리프 텍스트)
+DB_PATH = None
+PLAN_FN = None
+SCRIPT_FN = None
+BOT_LINK = "https://t.me/kodex_economy"
+MAKER = "주식회사 슈카친구들"
 KST = timezone(timedelta(hours=9))
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
-JOBS = {}           # 제작 브리프 생성 작업 상태 (메모리)
+JOBS = {}
 LOCK = threading.Lock()
 
 
-def configure(db_path, plan_fn=None):
-    global DB_PATH, PLAN_FN
+def configure(db_path, plan_fn=None, script_fn=None):
+    global DB_PATH, PLAN_FN, SCRIPT_FN
     DB_PATH = str(db_path)
     PLAN_FN = plan_fn
+    SCRIPT_FN = script_fn
 
 
 # ================= DB =================
@@ -39,6 +42,8 @@ def _con():
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, ymd TEXT,
         kind TEXT, source TEXT, title TEXT, body TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS plans(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS scripts(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
     return con
 
@@ -74,10 +79,15 @@ def get_plan(pid):
     return r[0] if r else None
 
 
-def save_plan(request, body):
+def get_script(sid):
+    r = _rows("SELECT id, ts, request, body FROM scripts WHERE id=?", (sid,))
+    return r[0] if r else None
+
+
+def _save(table, request, body):
     con = _con()
     try:
-        cur = con.execute("INSERT INTO plans(ts,request,body) VALUES(?,?,?)",
+        cur = con.execute(f"INSERT INTO {table}(ts,request,body) VALUES(?,?,?)",
                           (datetime.now(KST).isoformat(), request, body))
         con.commit()
         return cur.lastrowid
@@ -109,7 +119,7 @@ def source_label(source):
     return "자동" if source == "auto" else ("수동" if source == "manual" else (source or ""))
 
 
-# ================= 제작 브리프 텍스트 -> 읽기 좋은 HTML =================
+# ================= 제작 브리프 텍스트 -> HTML =================
 _HEADERS = ["🎬", "📌", "🎯", "🧩", "⚠️", "⚠", "🕐", "▶"]
 
 
@@ -122,7 +132,6 @@ def _match_header(line):
 
 
 def _maybe_label(text):
-    # "라벨: 내용" 형태면 라벨을 굵게 (짧고 문장부호가 없을 때만)
     if ":" in text:
         label, rest = text.split(":", 1)
         lb = label.strip()
@@ -215,6 +224,61 @@ def render_brief(body):
     return "".join(out)
 
 
+# ================= 완성 스크립트 텍스트 -> HTML =================
+def render_script(body):
+    lines = (body or "").splitlines()
+    sections, cur, pre = [], None, []
+    for raw in lines:
+        line = raw.rstrip()
+        m = re.match(r"^\[(.+?)\]\s*$", line.strip())
+        if m:
+            cur = [m.group(1).strip(), []]
+            sections.append(cur)
+            continue
+        if cur is None:
+            if line.strip():
+                pre.append(line)
+            continue
+        cur[1].append(line)
+
+    if not sections:
+        return f"<div class='body'>{html.escape(body or '')}</div>"
+
+    out = []
+    if pre:
+        out.append("<div class='body'>" + "<br>".join(html.escape(p) for p in pre) + "</div>")
+    for header, content in sections:
+        disc = "유의문구" in header
+        out.append("<section class='brief-sec" + (" disc" if disc else "") + "'>")
+        out.append(f"<h2 class='sec-h'><span class='sec-ic'>▪</span>{html.escape(header)}</h2>")
+        out.append(_script_body(header, content, disc))
+        out.append("</section>")
+    return "".join(out)
+
+
+def _script_body(header, lines, disc):
+    out, para = [], []
+    is_body = "본문" in header
+
+    def flush():
+        if para:
+            out.append("<p class='sec-p'>" + "<br>".join(html.escape(x) for x in para) + "</p>")
+            para.clear()
+
+    for line in lines:
+        s = line.strip()
+        if s == "":
+            flush()
+            continue
+        if is_body and s.startswith("(") and s.endswith(")"):
+            flush()
+            out.append("<div class='scene'>🎬 " + html.escape(s[1:-1].strip()) + "</div>")
+            continue
+        para.append(s)
+    flush()
+    return "".join(out)
+
+
 # ================= HTML 뼈대 =================
 CSS = """
 :root{
@@ -224,94 +288,68 @@ CSS = """
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   --sans:"Pretendard Variable",Pretendard,-apple-system,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif;
 }
-*{box-sizing:border-box}
-html,body{margin:0}
-body{background:var(--bg);color:var(--ink);font-family:var(--sans);
-  line-height:1.62;-webkit-font-smoothing:antialiased}
-.topbar{position:sticky;top:0;z-index:5;background:rgba(255,255,255,.92);
-  backdrop-filter:saturate(180%) blur(8px);border-bottom:1px solid var(--line)}
-.topbar .in{max-width:760px;margin:0 auto;display:flex;align-items:center;
-  gap:14px;padding:11px 18px}
+*{box-sizing:border-box} html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;-webkit-font-smoothing:antialiased}
+.topbar{position:sticky;top:0;z-index:5;background:rgba(255,255,255,.92);backdrop-filter:saturate(180%) blur(8px);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:760px;margin:0 auto;display:flex;align-items:center;gap:14px;padding:11px 18px}
 .brand{font-weight:800;font-size:15px;letter-spacing:-.01em;text-decoration:none;color:var(--ink)}
 .nav{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap}
-.nav a{font-family:var(--mono);font-size:12px;color:var(--muted);text-decoration:none;
-  padding:5px 9px;border-radius:8px}
-.nav a:hover{color:var(--ink);background:var(--bg)}
-.nav a.on{color:var(--accent);background:var(--pm-bg)}
+.nav a{font-family:var(--mono);font-size:12px;color:var(--muted);text-decoration:none;padding:5px 9px;border-radius:8px}
+.nav a:hover{color:var(--ink);background:var(--bg)} .nav a.on{color:var(--accent);background:var(--pm-bg)}
 .wrap{max-width:760px;margin:0 auto;padding:0 18px 72px}
 header.mast{padding:30px 0 16px;border-bottom:2px solid var(--ink);margin-bottom:8px}
-.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--muted);margin:0 0 6px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 6px}
 h1.title{font-size:30px;font-weight:800;letter-spacing:-.01em;margin:0}
 .sub{color:var(--muted);font-size:14px;margin:6px 0 0}
+.maker{font-family:var(--mono);font-size:12px;color:var(--muted);margin:12px 0 0}
 .cards{display:grid;gap:12px;margin-top:22px}
-a.tile{display:block;text-decoration:none;color:inherit;background:var(--surface);
-  border:1px solid var(--line);border-radius:14px;padding:18px 18px;
-  transition:transform .12s ease,box-shadow .12s ease}
-a.tile:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(16,20,24,.07)}
-a.tile.soon{opacity:.62}
-.tile .tic{font-size:22px}
-.tile h3{margin:8px 0 4px;font-size:17px;font-weight:700}
-.tile p{margin:0;color:var(--muted);font-size:13.5px}
-.tile .badge{float:right;font-family:var(--mono);font-size:10px;color:var(--muted);
-  border:1px solid var(--line);border-radius:999px;padding:2px 8px}
-.datehead{font-family:var(--mono);font-size:13px;color:var(--muted);
-  letter-spacing:.02em;margin:26px 0 10px;display:flex;align-items:center;gap:10px}
+a.tile{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;transition:transform .12s ease,box-shadow .12s ease}
+a.tile:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(16,20,24,.07)} a.tile.soon{opacity:.62}
+.tile .tic{font-size:22px} .tile h3{margin:8px 0 4px;font-size:17px;font-weight:700} .tile p{margin:0;color:var(--muted);font-size:13.5px}
+.tile .badge{float:right;font-family:var(--mono);font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:2px 8px}
+.datehead{font-family:var(--mono);font-size:13px;color:var(--muted);letter-spacing:.02em;margin:26px 0 10px;display:flex;align-items:center;gap:10px}
 .datehead::after{content:"";flex:1;height:1px;background:var(--line)}
-a.card{display:block;text-decoration:none;color:inherit;background:var(--surface);
-  border:1px solid var(--line);border-left:3px solid var(--line);border-radius:12px;
-  padding:14px 16px;margin:0 0 10px;transition:transform .12s ease,box-shadow .12s ease}
+a.card{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--line);border-radius:12px;padding:14px 16px;margin:0 0 10px;transition:transform .12s ease,box-shadow .12s ease}
 a.card:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(16,20,24,.06)}
 a.card.am{border-left-color:var(--am)} a.card.pm{border-left-color:var(--pm)}
 .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .pill{font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px}
 .pill.am{color:var(--am);background:var(--am-bg)} .pill.pm{color:var(--pm);background:var(--pm-bg)}
-.tag{font-family:var(--mono);font-size:11px;color:var(--muted)}
-.time{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
+.tag{font-family:var(--mono);font-size:11px;color:var(--muted)} .time{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
 .ctitle{font-size:15px;font-weight:600;line-height:1.45;margin:0}
-.empty{background:var(--surface);border:1px dashed var(--line);border-radius:12px;
-  padding:26px 18px;color:var(--muted);text-align:center;margin-top:20px}
+.empty{background:var(--surface);border:1px dashed var(--line);border-radius:12px;padding:26px 18px;color:var(--muted);text-align:center;margin-top:20px}
 .empty code{font-family:var(--mono);background:var(--bg);padding:2px 6px;border-radius:6px;color:var(--ink)}
-a.back{display:inline-block;font-family:var(--mono);font-size:13px;color:var(--accent);
-  text-decoration:none;margin:18px 0 4px}
-a.back:hover{text-decoration:underline}
+a.back{display:inline-block;font-family:var(--mono);font-size:13px;color:var(--accent);text-decoration:none;margin:18px 0 4px} a.back:hover{text-decoration:underline}
 .dtitle{font-size:22px;font-weight:800;line-height:1.4;margin:14px 0 6px}
 .dmeta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-bottom:16px}
-.body{background:var(--surface);border:1px solid var(--line);border-radius:12px;
-  padding:18px;white-space:pre-wrap;word-break:break-word;font-size:15px}
-/* 제작 브리프 렌더 */
-.brief-sec{background:var(--surface);border:1px solid var(--line);border-radius:14px;
-  padding:16px 18px;margin:0 0 14px}
-.sec-h{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:700;
-  margin:0 0 10px;padding-bottom:9px;border-bottom:1px solid var(--line)}
+.body{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px;white-space:pre-wrap;word-break:break-word;font-size:15px}
+.brief-sec{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:0 0 14px}
+.brief-sec.disc{background:#FBFBFC} .brief-sec.disc .sec-p{font-size:12px;color:var(--muted);line-height:1.7}
+.sec-h{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:700;margin:0 0 10px;padding-bottom:9px;border-bottom:1px solid var(--line)}
 .sec-ic{font-size:16px}
 .sec-p{margin:0 0 8px;font-size:14.5px;color:#28303a}
-ul.blist{margin:6px 0 0;padding-left:18px} ul.blist li{margin:4px 0;font-size:14px}
-li.plain{list-style:none;margin-left:-18px}
-.angle{background:var(--bg);border:1px solid var(--line);border-radius:10px;
-  padding:12px 14px;margin:10px 0}
-.angle-h{font-weight:700;font-size:14.5px;display:flex;gap:8px;align-items:baseline}
-.anum{font-family:var(--mono);color:var(--accent);font-weight:700}
-/* 제작 브리프 입력 */
+ul.blist{margin:6px 0 0;padding-left:18px} ul.blist li{margin:4px 0;font-size:14px} li.plain{list-style:none;margin-left:-18px}
+.angle{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:10px 0}
+.angle-h{font-weight:700;font-size:14.5px;display:flex;gap:8px;align-items:baseline} .anum{font-family:var(--mono);color:var(--accent);font-weight:700}
+.scene{background:var(--pm-bg);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:13.5px;color:var(--pm);font-weight:500}
 .field{margin-top:8px}
-textarea#req{width:100%;min-height:96px;resize:vertical;padding:13px 14px;font-size:15px;
-  font-family:var(--sans);border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink)}
-textarea#req:focus{outline:none;border-color:var(--accent)}
-button#go{margin-top:10px;background:var(--accent);color:#fff;border:0;border-radius:10px;
-  font-size:15px;font-weight:600;padding:12px 20px;cursor:pointer}
-button#go:disabled{opacity:.55;cursor:default}
-#status{margin-top:14px;font-size:14px;color:var(--muted);display:flex;align-items:center;gap:10px;min-height:22px}
-.spin{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--accent);
-  border-radius:50%;animation:sp .8s linear infinite;display:inline-block}
+textarea.inp{width:100%;min-height:96px;resize:vertical;padding:13px 14px;font-size:15px;font-family:var(--sans);border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink)}
+textarea.inp:focus{outline:none;border-color:var(--accent)}
+button.go{margin-top:10px;background:var(--accent);color:#fff;border:0;border-radius:10px;font-size:15px;font-weight:600;padding:12px 20px;cursor:pointer}
+button.go:disabled{opacity:.55;cursor:default}
+.statusline{margin-top:14px;font-size:14px;color:var(--muted);display:flex;align-items:center;gap:10px;min-height:22px}
+.spin{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite;display:inline-block}
 @keyframes sp{to{transform:rotate(360deg)}}
-.recent{margin-top:30px}
-.recent h3{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;
-  color:var(--muted);margin:0 0 8px}
-a.rrow{display:flex;gap:10px;text-decoration:none;color:inherit;padding:11px 14px;background:var(--surface);
-  border:1px solid var(--line);border-radius:10px;margin-bottom:8px;font-size:14px}
-a.rrow:hover{border-color:var(--accent)}
-a.rrow .rt{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap}
+.recent{margin-top:30px} .recent h3{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+a.rrow{display:flex;gap:10px;text-decoration:none;color:inherit;padding:11px 14px;background:var(--surface);border:1px solid var(--line);border-radius:10px;margin-bottom:8px;font-size:14px}
+a.rrow:hover{border-color:var(--accent)} a.rrow .rt{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;margin-left:auto}
+a.openbot{display:inline-block;background:#229ED9;color:#fff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 20px;border-radius:10px;margin:6px 0 4px}
+.cmd{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:8px 0}
+.cmd code{font-family:var(--mono);font-weight:700;color:var(--accent);background:var(--pm-bg);padding:2px 8px;border-radius:6px;font-size:13px}
+.cmd p{margin:6px 0 0;font-size:14px;color:#28303a}
+.divider{margin:16px 0;font-weight:700;font-size:15px}
 footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+footer div{margin:2px 0}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 """
@@ -321,7 +359,8 @@ FONT = ('<link rel="stylesheet" '
 
 
 def _nav(active):
-    items = [("/", "홈"), ("/archive", "아카이브"), ("/plan", "제작 브리프"), ("/data", "데이터")]
+    items = [("/", "홈"), ("/bot", "텔레그램 봇"), ("/archive", "아카이브"),
+             ("/plan", "제작 브리프"), ("/data", "데이터")]
     links = "".join(
         f"<a href='{href}' class='{'on' if active == href else ''}'>{html.escape(label)}</a>"
         for href, label in items)
@@ -340,8 +379,36 @@ def page(title, inner, active="", extra_head=""):
         f"<body>{_nav(active)}<div class='wrap'>{inner}</div></body></html>")
 
 
-FOOT = ("<footer>본 페이지는 콘텐츠 기획 참고용입니다. "
-        "모든 수치·주가·뉴스는 사용 전 원문 및 준법 확인이 필요합니다.</footer>")
+FOOT = (f"<footer><div>제작자: {html.escape(MAKER)}</div>"
+        "<div>본 페이지는 콘텐츠 기획 참고용입니다. 모든 수치·주가·뉴스는 사용 전 원문 및 준법 확인이 필요합니다.</div></footer>")
+
+
+# ================= 공용 JS (job 폴링) =================
+def _poll_js(btn, inp, status, endpoint, view_prefix, id_field):
+    return ("""
+document.addEventListener('DOMContentLoaded', function(){
+  var go=document.getElementById('%s'), inp=document.getElementById('%s'), st=document.getElementById('%s');
+  if(!go) return;
+  go.addEventListener('click', function(){
+    var v=(inp.value||'').trim();
+    if(!v){ st.textContent='내용을 입력해 주세요.'; return; }
+    go.disabled=true;
+    st.innerHTML="<span class='spin'></span><span>생성 중입니다… 웹 검색 포함 30초~1분 걸립니다. 이 화면을 닫지 마세요.</span>";
+    fetch('%s',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request:v})})
+      .then(function(r){return r.json();})
+      .then(function(j){ if(!j.job_id){throw new Error(j.error||'요청 실패');} poll(j.job_id); })
+      .catch(function(e){ go.disabled=false; st.textContent='오류: '+e.message; });
+  });
+  function poll(id){
+    var t=setInterval(function(){
+      fetch('/job/'+id).then(function(r){return r.json();}).then(function(j){
+        if(j.status==='done'){ clearInterval(t); window.location='%s'+j.%s; }
+        else if(j.status==='error'){ clearInterval(t); go.disabled=false; st.textContent='생성 중 오류: '+(j.error||'알 수 없음'); }
+      }).catch(function(){});
+    }, 3000);
+  }
+});
+""" % (btn, inp, status, endpoint, view_prefix, id_field))
 
 
 # ================= 라우트 =================
@@ -353,20 +420,44 @@ def robots():
 @app.get("/", response_class=HTMLResponse)
 def home():
     inner = (
-        "<header class='mast'>"
-        "<p class='eyebrow'>KODEX Content Hub</p>"
+        "<header class='mast'><p class='eyebrow'>KODEX Content Hub</p>"
         "<h1 class='title'>KODEX 시황 브리핑</h1>"
-        "<p class='sub'>브리핑 아카이브와 숏폼 제작 기획을 한곳에서.</p>"
-        "</header>"
+        "<p class='sub'>텔레그램 봇, 브리핑 아카이브, 숏폼 제작 기획을 한곳에서.</p>"
+        f"<p class='maker'>제작자: {html.escape(MAKER)}</p></header>"
         "<div class='cards'>"
+        "<a class='tile' href='/bot'><div class='tic'>💬</div>"
+        "<h3>텔레그램 봇</h3><p>자동 브리핑 수신과 즉석 명령(/pm, /plan, /script) 사용법을 안내합니다.</p></a>"
         "<a class='tile' href='/archive'><div class='tic'>🗂</div>"
         "<h3>브리핑 아카이브</h3><p>매일 오전·오후 시황 브리핑을 날짜별로 모아 봅니다.</p></a>"
         "<a class='tile' href='/plan'><div class='tic'>🎬</div>"
-        "<h3>제작 브리프</h3><p>밀고 싶은 상품·이슈를 넣으면 스토리 앵글·컴플·톤을 기획합니다.</p></a>"
+        "<h3>제작 브리프</h3><p>밀고 싶은 상품·이슈를 넣으면 스토리 앵글·컴플·톤을 기획하고, 완성 스크립트까지 만듭니다.</p></a>"
         "<a class='tile soon' href='/data'><span class='badge'>준비 중</span><div class='tic'>📊</div>"
         "<h3>시황 데이터</h3><p>집중 상품 흐름을 그래프로 보는 화면을 준비하고 있습니다.</p></a>"
         "</div>" + FOOT)
     return page("KODEX 시황 브리핑", inner, active="/")
+
+
+@app.get("/bot", response_class=HTMLResponse)
+def bot_guide():
+    cmds = [
+        ("/brief", "지금 오전형 브리핑(밤사이 미국장 + 전날 마감)을 받습니다."),
+        ("/pm", "지금 오후형 브리핑(오늘 코스피 마감·장중 이벤트)을 받습니다."),
+        ("/plan [상품/이슈]", "숏폼 제작 브리프를 만듭니다. 이 웹의 '제작 브리프'에서도 할 수 있습니다."),
+        ("/script [이슈 + 상품]", "완성 숏폼 스크립트를 만듭니다. 이 웹에서도 만들 수 있습니다."),
+    ]
+    cmd_html = "".join(
+        f"<div class='cmd'><code>{html.escape(c)}</code><p>{html.escape(d)}</p></div>" for c, d in cmds)
+    inner = (
+        "<header class='mast'><p class='eyebrow'>Telegram Bot</p>"
+        "<h1 class='title'>텔레그램 봇</h1>"
+        "<p class='sub'>자동 브리핑을 받고, 즉석에서 브리핑·스크립트를 만드는 봇입니다.</p></header>"
+        f"<a class='openbot' href='{html.escape(BOT_LINK)}' target='_blank' rel='noopener'>텔레그램 봇 열기</a>"
+        "<div class='divider'>명령어</div>" + cmd_html +
+        "<div class='divider'>사용법</div>"
+        "<div class='cmd'><p>· 자동 브리핑은 공식 채널에 평일 오전 9시·오후 3시 45분에 올라옵니다. 채널을 구독해 두면 됩니다.</p>"
+        "<p>· 즉석 명령(/brief, /pm, /plan, /script)은 봇과의 1:1 대화나 봇이 있는 그룹방에서 입력하세요. (채널에서는 명령을 쓸 수 없습니다.)</p>"
+        "<p>· 예) <code>/script 마이크론 시총 1조 돌파, AI반도체TOP2플러스로</code></p></div>" + FOOT)
+    return page("텔레그램 봇 안내", inner, active="/bot")
 
 
 @app.get("/archive", response_class=HTMLResponse)
@@ -421,7 +512,7 @@ def plan_form():
         rows = "".join(
             f"<a class='rrow' href='/plan/view/{pid}'>"
             f"<span>{html.escape((req or '').strip()[:60] or '(제목 없음)')}</span>"
-            f"<span class='rt' style='margin-left:auto'>{html.escape(fmt_time(ts))}</span></a>"
+            f"<span class='rt'>{html.escape(fmt_time(ts))}</span></a>"
             for pid, ts, req in recents)
         rec_html = f"<div class='recent'><h3>최근 생성한 브리프</h3>{rows}</div>"
     disabled = "" if PLAN_FN else "disabled"
@@ -433,69 +524,53 @@ def plan_form():
         "스토리 앵글·경쟁사 차별점·컴플 체크·톤 가이드를 정리해 드립니다.</p></header>"
         + warn +
         "<div class='field'>"
-        "<textarea id='req' placeholder='예) KODEX 미국우주항공, 우주항공 테마 강세'></textarea>"
-        f"<div><button id='go' {disabled}>브리프 생성</button></div>"
-        "<div id='status'></div></div>" + rec_html + FOOT)
-    return page("제작 브리프", inner, active="/plan", extra_head=f"<script>{PLAN_JS}</script>")
-
-
-PLAN_JS = """
-document.addEventListener('DOMContentLoaded', function(){
-  var go=document.getElementById('go'), req=document.getElementById('req'), st=document.getElementById('status');
-  if(!go) return;
-  go.addEventListener('click', function(){
-    var v=(req.value||'').trim();
-    if(!v){ st.textContent='상품명이나 이슈를 입력해 주세요.'; return; }
-    go.disabled=true;
-    st.innerHTML="<span class='spin'></span><span>브리프를 생성 중입니다… 웹 검색 포함 30초~1분 걸립니다. 이 화면을 닫지 마세요.</span>";
-    fetch('/plan/new',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request:v})})
-      .then(function(r){return r.json();})
-      .then(function(j){ if(!j.job_id){throw new Error(j.error||'요청 실패');} poll(j.job_id); })
-      .catch(function(e){ go.disabled=false; st.textContent='오류: '+e.message; });
-  });
-  function poll(id){
-    var t=setInterval(function(){
-      fetch('/plan/status/'+id).then(function(r){return r.json();}).then(function(j){
-        if(j.status==='done'){ clearInterval(t); window.location='/plan/view/'+j.plan_id; }
-        else if(j.status==='error'){ clearInterval(t); go.disabled=false; st.textContent='생성 중 오류: '+(j.error||'알 수 없음'); }
-      }).catch(function(){});
-    }, 3000);
-  }
-});
-"""
+        "<textarea id='req' class='inp' placeholder='예) KODEX 미국우주항공, 우주항공 테마 강세'></textarea>"
+        f"<div><button id='go' class='go' {disabled}>브리프 생성</button></div>"
+        "<div id='status' class='statusline'></div></div>" + rec_html + FOOT)
+    js = _poll_js("go", "req", "status", "/plan/new", "/plan/view/", "plan_id")
+    return page("제작 브리프", inner, active="/plan", extra_head=f"<script>{js}</script>")
 
 
 @app.post("/plan/new")
 async def plan_new(req: Request):
+    return await _new_job(req, PLAN_FN, "plans", "plan_id")
+
+
+@app.post("/script/new")
+async def script_new(req: Request):
+    return await _new_job(req, SCRIPT_FN, "scripts", "script_id")
+
+
+async def _new_job(req, fn, table, id_field):
     try:
         data = await req.json()
     except Exception:
         return JSONResponse({"error": "잘못된 요청입니다."}, status_code=400)
     q = (data.get("request") or "").strip()
     if not q:
-        return JSONResponse({"error": "상품명이나 이슈를 입력해 주세요."}, status_code=400)
-    if PLAN_FN is None:
-        return JSONResponse({"error": "제작 기능이 연결되지 않았습니다."}, status_code=503)
+        return JSONResponse({"error": "내용을 입력해 주세요."}, status_code=400)
+    if fn is None:
+        return JSONResponse({"error": "이 기능이 연결되지 않았습니다."}, status_code=503)
     job_id = uuid.uuid4().hex
     with LOCK:
         JOBS[job_id] = {"status": "pending"}
-    threading.Thread(target=_run_plan, args=(job_id, q), daemon=True).start()
+    threading.Thread(target=_run_job, args=(job_id, q, fn, table, id_field), daemon=True).start()
     return JSONResponse({"job_id": job_id})
 
 
-def _run_plan(job_id, q):
+def _run_job(job_id, q, fn, table, id_field):
     try:
-        text = PLAN_FN(q)
-        pid = save_plan(q, text)
+        text = fn(q)
+        new_id = _save(table, q, text)
         with LOCK:
-            JOBS[job_id] = {"status": "done", "plan_id": pid}
+            JOBS[job_id] = {"status": "done", id_field: new_id}
     except Exception as e:
         with LOCK:
             JOBS[job_id] = {"status": "error", "error": str(e)[:200]}
 
 
-@app.get("/plan/status/{job_id}")
-def plan_status(job_id: str):
+@app.get("/job/{job_id}")
+def job_status(job_id: str):
     with LOCK:
         j = JOBS.get(job_id)
     if not j:
@@ -511,11 +586,36 @@ def plan_view(pid: int):
                     "<a class='back' href='/plan'>← 제작 브리프로</a>"
                     "<div class='empty'>해당 브리프를 찾을 수 없습니다.</div>", active="/plan")
     _id, ts, request, body = row
+    prefill = html.escape((request or "").strip())
+    sdisabled = "" if SCRIPT_FN else "disabled"
+    script_block = (
+        "<section class='brief-sec'>"
+        "<h2 class='sec-h'><span class='sec-ic'>🎥</span>이 브리프로 완성 스크립트 만들기</h2>"
+        "<p class='sec-p'>원하는 앵글이나 방향을 적으면 40~60초 숏폼 스크립트를 웹에서 바로 만들어 드립니다.</p>"
+        f"<textarea id='sreq' class='inp' placeholder='예) 1번 앵글로, KODEX 미국우주항공'>{prefill}</textarea>"
+        f"<div><button id='sgo' class='go' {sdisabled}>스크립트 생성</button></div>"
+        "<div id='sstatus' class='statusline'></div></section>")
     inner = ("<a class='back' href='/plan'>← 제작 브리프로</a>"
              f"<div class='dmeta' style='margin-top:14px'>입력: {html.escape((request or '').strip()[:120])}"
              f" · {html.escape(fmt_time(ts))}</div>"
-             + render_brief(body) + FOOT)
-    return page("제작 브리프 결과", inner, active="/plan")
+             + render_brief(body) + script_block + FOOT)
+    js = _poll_js("sgo", "sreq", "sstatus", "/script/new", "/script/view/", "script_id")
+    return page("제작 브리프 결과", inner, active="/plan", extra_head=f"<script>{js}</script>")
+
+
+@app.get("/script/view/{sid}", response_class=HTMLResponse)
+def script_view(sid: int):
+    row = get_script(sid)
+    if not row:
+        return page("스크립트를 찾을 수 없음",
+                    "<a class='back' href='/plan'>← 제작 브리프로</a>"
+                    "<div class='empty'>해당 스크립트를 찾을 수 없습니다.</div>", active="/plan")
+    _id, ts, request, body = row
+    inner = ("<a class='back' href='/plan'>← 제작 브리프로</a>"
+             "<h1 class='dtitle' style='margin-top:14px'>완성 스크립트</h1>"
+             f"<div class='dmeta'>입력: {html.escape((request or '').strip()[:120])} · {html.escape(fmt_time(ts))}</div>"
+             + render_script(body) + FOOT)
+    return page("완성 스크립트", inner, active="/plan")
 
 
 @app.get("/data", response_class=HTMLResponse)
