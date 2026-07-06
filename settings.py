@@ -8,7 +8,7 @@
 FOCUS_PRODUCTS = [
     {"name": "KODEX 삼성전자SK하이닉스채권혼합50", "code": "0177N0"},
     {"name": "KODEX 전고체배터리ESS TOP2플러스", "code": "0209D0"},
-    {"name": " KODEX AI반도체TOP2플러스", "code": "395160"},
+    {"name": "KODEX AI반도체TOP2플러스", "code": "395160"},
 ]
 
 # 2) 연동 상품 세트 (함께 제안하면 자연스러운 조합) — 없으면 [] 로 비워둡니다.
