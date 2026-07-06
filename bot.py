@@ -32,6 +32,7 @@ from telegram.ext import (
 )
 
 import settings
+import market_data
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -325,6 +326,29 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"이 채팅 ID: {update.effective_chat.id}")
 
 
+async def cmd_marketdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 운영자 전용: 공개 데이터(네이버금융) 조회가 정상인지 확인하는 진단 명령.
+    # 아직 브리핑에는 넣지 않고, 값이 맞는지 눈으로 확인하는 용도.
+    if ADMIN_CHAT_ID and str(update.effective_chat.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("이 명령은 운영자만 사용할 수 있어요.")
+        return
+    await update.message.reply_text("공개 데이터(네이버금융)로 집중 상품 시세를 확인 중입니다…")
+    try:
+        block = await asyncio.to_thread(market_data.notable_focus_products)
+    except Exception as e:
+        log.exception("marketdata failed")
+        await update.message.reply_text(f"조회 중 오류가 발생했습니다: {e}")
+        return
+    if not block:
+        await update.message.reply_text(
+            "집중 상품 시세 데이터를 가져오지 못했습니다.\n"
+            "종목코드가 맞는지, 네이버금융 응답이 정상인지 확인이 필요합니다.")
+        return
+    await update.message.reply_text(
+        "집중 상품 전일 시세 (등락률 절댓값 큰 순 · 네이버금융 기준)\n\n" + block
+        + "\n\n※ 진단용입니다. 이 숫자가 네이버금융 화면과 맞는지 확인되면 오전 브리핑에 연결합니다.")
+
+
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ADMIN_CHAT_ID and str(update.effective_chat.id) != ADMIN_CHAT_ID:
         await update.message.reply_text("이 명령은 운영자만 사용할 수 있어요.")
@@ -463,6 +487,7 @@ def main():
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("marketdata", cmd_marketdata))
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("pm", cmd_pm))
     app.add_handler(CommandHandler("script", cmd_script))
