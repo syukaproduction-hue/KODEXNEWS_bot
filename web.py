@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 
 import market_data
+import settings
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -52,6 +53,8 @@ def _con():
         con.execute("ALTER TABLE scripts ADD COLUMN plan_id INTEGER")  # 기존 테이블 대비
     except Exception:
         pass
+    con.execute("""CREATE TABLE IF NOT EXISTS product_news(
+        code TEXT PRIMARY KEY, title TEXT, url TEXT, updated_at TEXT)""")
     return con
 
 
@@ -146,18 +149,32 @@ def source_label(source):
 
 
 # ================= 시황 데이터 (캐시 + 차트) =================
-_MKT = {"focus": None, "kospi": None, "ts": 0}
+UP_RED = "#D31A2B"      # 한국식: 상승 빨강
+DOWN_BLUE = "#0B4EA2"   # 한국식: 하락 파랑
+_MKT = {"focus": None, "kospi": None, "comp": None, "ts": 0}
 _MKT_TTL = 3600  # 1시간 (일별 데이터라 자주 안 바뀜)
 _MKT_LOCK = threading.Lock()
 CHART_DAYS = 20
+
+
+def _competitors():
+    # settings.COMPETITORS = { "집중상품코드": {"name": "TIGER OOO", "code": "종목코드"}, ... }
+    return getattr(settings, "COMPETITORS", {}) or {}
 
 
 def refresh_market_cache():
     try:
         focus = market_data.focus_series(CHART_DAYS)
         kospi = market_data.index_daily_series("KOSPI", CHART_DAYS)
+        comp = {}
+        for fcode, c in _competitors().items():
+            try:
+                comp[fcode] = {"name": c.get("name", ""), "code": c.get("code", ""),
+                               "series": market_data.daily_series(c.get("code", ""), CHART_DAYS)}
+            except Exception:
+                pass
         with _MKT_LOCK:
-            _MKT["focus"], _MKT["kospi"], _MKT["ts"] = focus, kospi, time.time()
+            _MKT["focus"], _MKT["kospi"], _MKT["comp"], _MKT["ts"] = focus, kospi, comp, time.time()
     except Exception:
         pass
 
@@ -168,7 +185,7 @@ def get_market():
     if not fresh:
         refresh_market_cache()
     with _MKT_LOCK:
-        return _MKT["focus"] or [], _MKT["kospi"] or []
+        return _MKT["focus"] or [], _MKT["kospi"] or [], _MKT["comp"] or {}
 
 
 def start_refresher():
@@ -180,6 +197,11 @@ def start_refresher():
     threading.Thread(target=loop, daemon=True).start()
 
 
+def get_all_news():
+    rows = _rows("SELECT code, title, url, updated_at FROM product_news")
+    return {r[0]: {"title": r[1], "url": r[2], "updated_at": r[3]} for r in rows}
+
+
 def _fmt_num(v, dec=0):
     try:
         return f"{v:,.{dec}f}"
@@ -187,46 +209,67 @@ def _fmt_num(v, dec=0):
         return "-"
 
 
-def _sparkline(series, w=320, h=70):
+def _short_dt(iso):
+    try:
+        dt = datetime.fromisoformat(iso)
+        return f"{dt.month}/{dt.day} {dt.strftime('%H:%M')}"
+    except Exception:
+        return iso or ""
+
+
+def _trend_color(series):
+    closes = [o["close"] for o in series if o.get("close") is not None]
+    if len(closes) < 2:
+        return "#334155"
+    if closes[-1] > closes[0]:
+        return UP_RED
+    if closes[-1] < closes[0]:
+        return DOWN_BLUE
+    return "#334155"
+
+
+def _sparkline(series, color, gid, w=320, h=70):
     closes = [o["close"] for o in series if o.get("close") is not None]
     if len(closes) < 2:
         return ""
     lo, hi = min(closes), max(closes)
     rng = (hi - lo) or 1
     n = len(closes)
-    pts = [(i / (n - 1) * w, h - (c - lo) / rng * (h - 8) - 4) for i, c in enumerate(closes)]
+    pts = [(i / (n - 1) * w, h - (c - lo) / rng * (h - 10) - 5) for i, c in enumerate(closes)]
     line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
     area = f"0,{h} " + line + f" {w},{h}"
     return (f"<svg class='chart' viewBox='0 0 {w} {h}' preserveAspectRatio='none' role='img'>"
-            f"<polyline points='{area}' fill='url(#g)' stroke='none'/>"
-            f"<polyline points='{line}' fill='none' stroke='#334155' stroke-width='2' "
-            f"stroke-linejoin='round' stroke-linecap='round'/>"
-            f"<defs><linearGradient id='g' x1='0' y1='0' x2='0' y2='1'>"
-            f"<stop offset='0' stop-color='#334155' stop-opacity='0.14'/>"
-            f"<stop offset='1' stop-color='#334155' stop-opacity='0'/></linearGradient></defs></svg>")
+            f"<polyline points='{area}' fill='url(#{gid})' stroke='none'/>"
+            f"<polyline points='{line}' fill='none' stroke='{color}' stroke-width='2' "
+            f"stroke-linejoin='round' stroke-linecap='round' vector-effect='non-scaling-stroke'/>"
+            f"<defs><linearGradient id='{gid}' x1='0' y1='0' x2='0' y2='1'>"
+            f"<stop offset='0' stop-color='{color}' stop-opacity='0.16'/>"
+            f"<stop offset='1' stop-color='{color}' stop-opacity='0'/></linearGradient></defs></svg>")
 
 
 def _volbars(series, w=320, h=26):
-    vols = [(o.get("vol") or 0) for o in series]
-    if not any(vols):
+    if not any((o.get("vol") or 0) for o in series):
         return ""
-    mx = max(vols) or 1
-    n = len(vols)
-    bw = w / n * 0.66
+    mx = max((o.get("vol") or 0) for o in series) or 1
+    n = len(series)
+    bw = w / n * 0.62
     gap = w / n
     bars = []
-    for i, v in enumerate(vols):
+    for i, o in enumerate(series):
+        v = o.get("vol") or 0
+        r = o.get("rate") or 0
+        col = "rgba(211,26,43,0.55)" if r > 0 else ("rgba(11,78,162,0.5)" if r < 0 else "#CBD3DD")
         bh = (v / mx) * h
         x = i * gap + (gap - bw) / 2
-        bars.append(f"<rect x='{x:.1f}' y='{h - bh:.1f}' width='{bw:.1f}' height='{bh:.1f}' rx='1' fill='#CBD3DD'/>")
+        bars.append(f"<rect x='{x:.1f}' y='{h - bh:.1f}' width='{bw:.1f}' height='{bh:.1f}' rx='1' fill='{col}'/>")
     return f"<svg class='vol' viewBox='0 0 {w} {h}' preserveAspectRatio='none'>{''.join(bars)}</svg>"
 
 
-def _data_card(name, code, series):
+def _product_block(name, code, series, gid):
+    head = (f"<div class='dtop'><span class='dname'>{html.escape(name)}</span>"
+            f"<span class='dcode'>{html.escape(code)}</span></div>")
     if len(series) < 2:
-        return (f"<div class='dcard'><div class='dtop'><span class='dname'>{html.escape(name)}</span>"
-                f"<span class='dcode'>{html.escape(code)}</span></div>"
-                "<div class='dmeta'>데이터를 가져오지 못했습니다.</div></div>")
+        return head + "<div class='dmeta'>데이터를 가져오지 못했습니다.</div>"
     closes = [o["close"] for o in series]
     last = series[-1]
     rate = last.get("rate")
@@ -236,15 +279,56 @@ def _data_card(name, code, series):
     arrow = "▲" if up else ("▼" if down else "-")
     rate_s = f"{arrow} {abs(rate):.2f}%" if rate is not None else ""
     hi, lo = max(closes), min(closes)
-    return (
-        "<div class='dcard'>"
-        f"<div class='dtop'><span class='dname'>{html.escape(name)}</span>"
-        f"<span class='dcode'>{html.escape(code)}</span></div>"
-        f"<div class='dprice'><span class='dclose'>{_fmt_num(last['close'])}</span>"
-        f"<span class='drate {cls}'>{html.escape(rate_s)}</span></div>"
-        + _sparkline(series) + _volbars(series) +
-        f"<div class='dmeta'>최근 {len(series)}거래일 · 고 {_fmt_num(hi)} / 저 {_fmt_num(lo)} · 참고: 네이버금융 시세</div>"
-        "</div>")
+    color = _trend_color(series)
+    chart = (f"<div class='pricebox'>"
+             f"<span class='plabel top'>고 {_fmt_num(hi)}</span>"
+             f"<span class='plabel bot'>저 {_fmt_num(lo)}</span>"
+             f"{_sparkline(series, color, gid)}</div>{_volbars(series)}")
+    return (head +
+            f"<div class='dprice'><span class='dclose'>{_fmt_num(last['close'])}</span>"
+            f"<span class='drate {cls}'>{html.escape(rate_s)}</span></div>" + chart +
+            f"<div class='dmeta'>최근 {len(series)}거래일 · 참고: 네이버금융 시세</div>")
+
+
+def _news_mood_request(name, code, news):
+    title = (news.get("title") or "").strip()
+    url = (news.get("url") or "").strip()
+    return (f"[시황 분위기 중심 숏폼] {name} ({code}) 관련 오늘 시황 소재로 숏폼 스크립트를 써줘. "
+            f"정보 전달·인과 단정보다 오늘 시장의 분위기와 온도를 전하는 톤으로. "
+            f"특정 재료가 주가를 올렸다/내렸다는 미확인 인과 단정은 넣지 마라. "
+            f"소재 기사: {title}" + (f" ({url})" if url else ""))
+
+
+def _data_card(name, code, series, gid, competitor=None, news=None, news_slot=True):
+    comp_ok = competitor and len(competitor.get("series") or []) >= 2
+    if comp_ok:
+        body = ("<div class='compare'>"
+                "<div class='compare-col'><div class='rolelab our'>우리 · KODEX</div>"
+                + _product_block(name, code, series, gid) + "</div>"
+                "<div class='compare-col'><div class='rolelab comp'>경쟁사 · TIGER</div>"
+                + _product_block(competitor.get("name") or "경쟁사",
+                                 competitor.get("code") or "", competitor.get("series"), gid + "c") + "</div>"
+                "</div>")
+    else:
+        body = _product_block(name, code, series, gid)
+    newsblock = ""
+    if news_slot:
+        if news and news.get("title"):
+            req = _news_mood_request(name, code, news)
+            btn = ""
+            if SCRIPT_FN:
+                btn = (f"<button class='go newsgen' data-req=\"{html.escape(req)}\">이 기사로 시황 숏폼 만들기</button>"
+                       "<div class='newsstatus statusline'></div>")
+            meta = (f"<div class='newsmeta'>업데이트 {html.escape(_short_dt(news.get('updated_at')))}</div>"
+                    if news.get("updated_at") else "")
+            newsblock = (
+                "<div class='newsbox'><div class='newslabel'>🎬 오늘의 시황 숏폼 소재</div>"
+                f"<a class='newslink' href='{html.escape(news.get('url') or '#')}' target='_blank' rel='noopener'>"
+                f"{html.escape(news['title'])}</a>{meta}{btn}</div>")
+        else:
+            newsblock = ("<div class='newsbox nb-empty'>오늘의 시황 숏폼 소재가 아직 없습니다. "
+                         "텔레그램 봇에서 <code>/news</code> 명령으로 등록하세요.</div>")
+    return f"<div class='dcard'>{body}{newsblock}</div>"
 
 
 # ================= 제작 브리프 텍스트 -> HTML =================
@@ -483,7 +567,22 @@ a.openbot{display:inline-block;background:#229ED9;color:#fff;text-decoration:non
 .dprice{display:flex;align-items:baseline;gap:10px;margin:4px 0 10px}
 .dclose{font-size:20px;font-weight:800;letter-spacing:-.01em}
 .drate{font-family:var(--mono);font-size:13px;font-weight:700} .drate.up{color:#D31A2B} .drate.down{color:#0B4EA2}
-svg.chart{display:block;width:100%;height:70px} svg.vol{display:block;width:100%;height:26px;margin-top:2px;opacity:.85}
+svg.chart{display:block;width:100%;height:70px} svg.vol{display:block;width:100%;height:26px;margin-top:2px;opacity:.9}
+.pricebox{position:relative}
+.plabel{position:absolute;right:2px;font-family:var(--mono);font-size:10px;color:var(--muted);background:rgba(255,255,255,.7);padding:0 3px;border-radius:4px;pointer-events:none}
+.plabel.top{top:0} .plabel.bot{bottom:2px}
+.compare{display:flex;flex-wrap:wrap;gap:14px} .compare-col{flex:1 1 250px;min-width:0}
+.rolelab{font-family:var(--mono);font-size:11px;letter-spacing:.04em;margin-bottom:6px;display:inline-block;padding:2px 8px;border-radius:999px}
+.rolelab.our{color:var(--accent);background:var(--pm-bg)} .rolelab.comp{color:#5B6472;background:#EEF1F4}
+.newsbox{margin-top:14px;padding-top:14px;border-top:1px dashed var(--line)}
+.newslabel{font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--am);margin-bottom:6px}
+a.newslink{display:block;font-size:15px;font-weight:600;color:var(--ink);text-decoration:none;line-height:1.45;overflow-wrap:anywhere}
+a.newslink:hover{color:var(--accent);text-decoration:underline}
+.newsmeta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:4px}
+.newsgen{margin-top:12px;font-size:14px;padding:10px 16px}
+.newsstatus{margin-top:8px}
+.newsbox.nb-empty{color:var(--muted);font-size:13px}
+.newsbox.nb-empty code{font-family:var(--mono);background:var(--bg);padding:2px 6px;border-radius:6px;color:var(--ink)}
 .footer{}
 footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
 footer div{margin:2px 0}
@@ -546,6 +645,32 @@ document.addEventListener('DOMContentLoaded', function(){
   }
 });
 """ % (btn, inp, status, endpoint, extra_payload, view_prefix, id_field))
+
+
+DATA_JS = """
+document.addEventListener('DOMContentLoaded', function(){
+  document.addEventListener('click', function(e){
+    var b = e.target.closest ? e.target.closest('.newsgen') : null;
+    if(!b) return;
+    var req = b.getAttribute('data-req') || '';
+    var st = b.parentNode.querySelector('.newsstatus');
+    b.disabled = true;
+    if(st) st.innerHTML = "<span class='spin'></span><span>시황 숏폼 스크립트를 만드는 중… 30초~1분. 이 화면을 닫지 마세요.</span>";
+    fetch('/script/new',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request:req})})
+      .then(function(r){return r.json();})
+      .then(function(j){ if(!j.job_id){throw new Error(j.error||'요청 실패');} poll(j.job_id, b, st); })
+      .catch(function(err){ b.disabled=false; if(st) st.textContent='오류: '+err.message; });
+  });
+  function poll(id, b, st){
+    var t=setInterval(function(){
+      fetch('/job/'+id).then(function(r){return r.json();}).then(function(j){
+        if(j.status==='done'){ clearInterval(t); window.location='/script/view/'+j.script_id; }
+        else if(j.status==='error'){ clearInterval(t); b.disabled=false; if(st) st.textContent='생성 중 오류: '+(j.error||'알 수 없음'); }
+      }).catch(function(){});
+    }, 3000);
+  }
+});
+"""
 
 
 # ================= 라우트 =================
@@ -795,22 +920,25 @@ def script_view(sid: int):
 
 @app.get("/data", response_class=HTMLResponse)
 def data_view():
-    focus, kospi = get_market()
+    focus, kospi, comp = get_market()
+    news = get_all_news()
     parts = ["<header class='mast'><p class='eyebrow'>Market Data</p>"
              "<h1 class='title'>시황 데이터</h1>"
-             "<p class='sub'>집중 상품의 최근 흐름입니다. 공개 데이터(네이버금융) 기준.</p></header>"]
+             "<p class='sub'>집중 상품의 최근 흐름과 오늘의 시황 숏폼 소재입니다. 공개 데이터(네이버금융) 기준.</p></header>"]
     if kospi and len(kospi) >= 2:
         parts.append("<div class='dsectitle'>코스피 지수</div>")
-        parts.append(_data_card("코스피", "KOSPI", kospi))
+        parts.append(_data_card("코스피", "KOSPI", kospi, "gk", news_slot=False))
     if focus:
         parts.append("<div class='dsectitle'>집중 상품</div>")
         got = False
-        for item in focus:
-            parts.append(_data_card(item["name"], item["code"], item.get("series") or []))
+        for idx, item in enumerate(focus):
+            parts.append(_data_card(item["name"], item["code"], item.get("series") or [],
+                                    f"g{idx}", competitor=comp.get(item["code"]),
+                                    news=news.get(item["code"])))
             got = got or len(item.get("series") or []) >= 2
         if not got and not (kospi and len(kospi) >= 2):
             parts.append("<div class='empty'>시세 데이터를 가져오지 못했습니다. 잠시 후 새로고침해 주세요.</div>")
     else:
         parts.append("<div class='empty'>표시할 집중 상품이 없습니다.</div>")
     parts.append(FOOT)
-    return page("시황 데이터", "".join(parts), active="/data")
+    return page("시황 데이터", "".join(parts), active="/data", extra_head=f"<script>{DATA_JS}</script>")
