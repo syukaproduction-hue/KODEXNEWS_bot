@@ -81,7 +81,11 @@ def db():
     conn.execute("""CREATE TABLE IF NOT EXISTS plans(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS scripts(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT, plan_id INTEGER)""")
+    try:
+        conn.execute("ALTER TABLE scripts ADD COLUMN plan_id INTEGER")  # 기존 테이블 대비
+    except Exception:
+        pass
     return conn
 
 
@@ -146,13 +150,13 @@ def save_plan(request, body):
         log.exception("save_plan failed")
 
 
-def save_script(request, body):
+def save_script(request, body, plan_id=None):
     # 완성 스크립트(/script 결과)를 웹 화면용으로 저장. 웹판과 동일 스키마.
     try:
         conn = db()
         conn.execute(
-            "INSERT INTO scripts(ts,request,body) VALUES(?,?,?)",
-            (datetime.now(TZ).isoformat(), (request or "")[:1000], body),
+            "INSERT INTO scripts(ts,request,body,plan_id) VALUES(?,?,?,?)",
+            (datetime.now(TZ).isoformat(), (request or "")[:1000], body, plan_id),
         )
         conn.commit(); conn.close()
     except Exception:
