@@ -6,6 +6,7 @@ KODEX 시황 브리핑 — 통합 웹 (홈 / 텔레그램 봇 안내 / 아카이
 
 import re
 import html
+import time
 import uuid
 import sqlite3
 import threading
@@ -13,6 +14,8 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
+
+import market_data
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -117,6 +120,108 @@ def kind_label(kind):
 
 def source_label(source):
     return "자동" if source == "auto" else ("수동" if source == "manual" else (source or ""))
+
+
+# ================= 시황 데이터 (캐시 + 차트) =================
+_MKT = {"focus": None, "kospi": None, "ts": 0}
+_MKT_TTL = 3600  # 1시간 (일별 데이터라 자주 안 바뀜)
+_MKT_LOCK = threading.Lock()
+CHART_DAYS = 20
+
+
+def refresh_market_cache():
+    try:
+        focus = market_data.focus_series(CHART_DAYS)
+        kospi = market_data.index_daily_series("KOSPI", CHART_DAYS)
+        with _MKT_LOCK:
+            _MKT["focus"], _MKT["kospi"], _MKT["ts"] = focus, kospi, time.time()
+    except Exception:
+        pass
+
+
+def get_market():
+    with _MKT_LOCK:
+        fresh = _MKT["focus"] is not None and (time.time() - _MKT["ts"]) < _MKT_TTL
+    if not fresh:
+        refresh_market_cache()
+    with _MKT_LOCK:
+        return _MKT["focus"] or [], _MKT["kospi"] or []
+
+
+def start_refresher():
+    # 시작 시 한 번 채우고, 이후 주기적으로 갱신. bot.py가 호출한다.
+    def loop():
+        while True:
+            refresh_market_cache()
+            time.sleep(_MKT_TTL)
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def _fmt_num(v, dec=0):
+    try:
+        return f"{v:,.{dec}f}"
+    except Exception:
+        return "-"
+
+
+def _sparkline(series, w=320, h=70):
+    closes = [o["close"] for o in series if o.get("close") is not None]
+    if len(closes) < 2:
+        return ""
+    lo, hi = min(closes), max(closes)
+    rng = (hi - lo) or 1
+    n = len(closes)
+    pts = [(i / (n - 1) * w, h - (c - lo) / rng * (h - 8) - 4) for i, c in enumerate(closes)]
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area = f"0,{h} " + line + f" {w},{h}"
+    return (f"<svg class='chart' viewBox='0 0 {w} {h}' preserveAspectRatio='none' role='img'>"
+            f"<polyline points='{area}' fill='url(#g)' stroke='none'/>"
+            f"<polyline points='{line}' fill='none' stroke='#334155' stroke-width='2' "
+            f"stroke-linejoin='round' stroke-linecap='round'/>"
+            f"<defs><linearGradient id='g' x1='0' y1='0' x2='0' y2='1'>"
+            f"<stop offset='0' stop-color='#334155' stop-opacity='0.14'/>"
+            f"<stop offset='1' stop-color='#334155' stop-opacity='0'/></linearGradient></defs></svg>")
+
+
+def _volbars(series, w=320, h=26):
+    vols = [(o.get("vol") or 0) for o in series]
+    if not any(vols):
+        return ""
+    mx = max(vols) or 1
+    n = len(vols)
+    bw = w / n * 0.66
+    gap = w / n
+    bars = []
+    for i, v in enumerate(vols):
+        bh = (v / mx) * h
+        x = i * gap + (gap - bw) / 2
+        bars.append(f"<rect x='{x:.1f}' y='{h - bh:.1f}' width='{bw:.1f}' height='{bh:.1f}' rx='1' fill='#CBD3DD'/>")
+    return f"<svg class='vol' viewBox='0 0 {w} {h}' preserveAspectRatio='none'>{''.join(bars)}</svg>"
+
+
+def _data_card(name, code, series):
+    if len(series) < 2:
+        return (f"<div class='dcard'><div class='dtop'><span class='dname'>{html.escape(name)}</span>"
+                f"<span class='dcode'>{html.escape(code)}</span></div>"
+                "<div class='dmeta'>데이터를 가져오지 못했습니다.</div></div>")
+    closes = [o["close"] for o in series]
+    last = series[-1]
+    rate = last.get("rate")
+    up = (rate or 0) > 0
+    down = (rate or 0) < 0
+    cls = "up" if up else ("down" if down else "")
+    arrow = "▲" if up else ("▼" if down else "-")
+    rate_s = f"{arrow} {abs(rate):.2f}%" if rate is not None else ""
+    hi, lo = max(closes), min(closes)
+    return (
+        "<div class='dcard'>"
+        f"<div class='dtop'><span class='dname'>{html.escape(name)}</span>"
+        f"<span class='dcode'>{html.escape(code)}</span></div>"
+        f"<div class='dprice'><span class='dclose'>{_fmt_num(last['close'])}</span>"
+        f"<span class='drate {cls}'>{html.escape(rate_s)}</span></div>"
+        + _sparkline(series) + _volbars(series) +
+        f"<div class='dmeta'>최근 {len(series)}거래일 · 고 {_fmt_num(hi)} / 저 {_fmt_num(lo)} · 참고: 네이버금융 시세</div>"
+        "</div>")
 
 
 # ================= 제작 브리프 텍스트 -> HTML =================
@@ -348,6 +453,14 @@ a.openbot{display:inline-block;background:#229ED9;color:#fff;text-decoration:non
 .cmd code{font-family:var(--mono);font-weight:700;color:var(--accent);background:var(--pm-bg);padding:2px 8px;border-radius:6px;font-size:13px}
 .cmd p{margin:6px 0 0;font-size:14px;color:#28303a}
 .divider{margin:16px 0;font-weight:700;font-size:15px}
+.dsectitle{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:24px 0 10px}
+.dcard{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:0 0 12px}
+.dtop{display:flex;align-items:baseline;gap:8px} .dname{font-weight:700;font-size:15px} .dcode{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.dprice{display:flex;align-items:baseline;gap:10px;margin:4px 0 10px}
+.dclose{font-size:20px;font-weight:800;letter-spacing:-.01em}
+.drate{font-family:var(--mono);font-size:13px;font-weight:700} .drate.up{color:#D31A2B} .drate.down{color:#0B4EA2}
+svg.chart{display:block;width:100%;height:70px} svg.vol{display:block;width:100%;height:26px;margin-top:2px;opacity:.85}
+.footer{}
 footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
 footer div{margin:2px 0}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
@@ -431,8 +544,8 @@ def home():
         "<h3>브리핑 아카이브</h3><p>매일 오전·오후 시황 브리핑을 날짜별로 모아 봅니다.</p></a>"
         "<a class='tile' href='/plan'><div class='tic'>🎬</div>"
         "<h3>제작 브리프</h3><p>밀고 싶은 상품·이슈를 넣으면 스토리 앵글·컴플·톤을 기획하고, 완성 스크립트까지 만듭니다.</p></a>"
-        "<a class='tile soon' href='/data'><span class='badge'>준비 중</span><div class='tic'>📊</div>"
-        "<h3>시황 데이터</h3><p>집중 상품 흐름을 그래프로 보는 화면을 준비하고 있습니다.</p></a>"
+        "<a class='tile' href='/data'><div class='tic'>📊</div>"
+        "<h3>시황 데이터</h3><p>집중 상품의 최근 흐름을 공개 데이터 기반 그래프로 봅니다.</p></a>"
         "</div>" + FOOT)
     return page("KODEX 시황 브리핑", inner, active="/")
 
@@ -619,9 +732,23 @@ def script_view(sid: int):
 
 
 @app.get("/data", response_class=HTMLResponse)
-def data_placeholder():
-    inner = ("<header class='mast'><p class='eyebrow'>Market Data</p>"
+def data_view():
+    focus, kospi = get_market()
+    parts = ["<header class='mast'><p class='eyebrow'>Market Data</p>"
              "<h1 class='title'>시황 데이터</h1>"
-             "<p class='sub'>집중 상품 흐름을 그래프로 보는 화면입니다.</p></header>"
-             "<div class='empty'>준비 중입니다. 곧 공개 데이터 기반 시황 차트가 들어갑니다.</div>" + FOOT)
-    return page("시황 데이터", inner, active="/data")
+             "<p class='sub'>집중 상품의 최근 흐름입니다. 공개 데이터(네이버금융) 기준.</p></header>"]
+    if kospi and len(kospi) >= 2:
+        parts.append("<div class='dsectitle'>코스피 지수</div>")
+        parts.append(_data_card("코스피", "KOSPI", kospi))
+    if focus:
+        parts.append("<div class='dsectitle'>집중 상품</div>")
+        got = False
+        for item in focus:
+            parts.append(_data_card(item["name"], item["code"], item.get("series") or []))
+            got = got or len(item.get("series") or []) >= 2
+        if not got and not (kospi and len(kospi) >= 2):
+            parts.append("<div class='empty'>시세 데이터를 가져오지 못했습니다. 잠시 후 새로고침해 주세요.</div>")
+    else:
+        parts.append("<div class='empty'>표시할 집중 상품이 없습니다.</div>")
+    parts.append(FOOT)
+    return page("시황 데이터", "".join(parts), active="/data")
