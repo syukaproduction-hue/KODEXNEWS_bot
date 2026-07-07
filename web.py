@@ -47,7 +47,11 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS plans(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS scripts(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT, plan_id INTEGER)""")
+    try:
+        con.execute("ALTER TABLE scripts ADD COLUMN plan_id INTEGER")  # 기존 테이블 대비
+    except Exception:
+        pass
     return con
 
 
@@ -83,15 +87,34 @@ def get_plan(pid):
 
 
 def get_script(sid):
-    r = _rows("SELECT id, ts, request, body FROM scripts WHERE id=?", (sid,))
+    r = _rows("SELECT id, ts, request, body, plan_id FROM scripts WHERE id=?", (sid,))
     return r[0] if r else None
 
 
-def _save(table, request, body):
+def list_scripts(limit=50):
+    return _rows("SELECT id, ts, request FROM scripts ORDER BY id DESC LIMIT ?", (limit,))
+
+
+def scripts_for_plan(pid):
+    return _rows("SELECT id, ts, request FROM scripts WHERE plan_id=? ORDER BY id DESC", (pid,))
+
+
+def _save_plan(request, body):
     con = _con()
     try:
-        cur = con.execute(f"INSERT INTO {table}(ts,request,body) VALUES(?,?,?)",
+        cur = con.execute("INSERT INTO plans(ts,request,body) VALUES(?,?,?)",
                           (datetime.now(KST).isoformat(), request, body))
+        con.commit()
+        return cur.lastrowid
+    finally:
+        con.close()
+
+
+def _save_script(request, body, plan_id=None):
+    con = _con()
+    try:
+        cur = con.execute("INSERT INTO scripts(ts,request,body,plan_id) VALUES(?,?,?,?)",
+                          (datetime.now(KST).isoformat(), request, body, plan_id))
         con.commit()
         return cur.lastrowid
     finally:
@@ -225,7 +248,7 @@ def _data_card(name, code, series):
 
 
 # ================= 제작 브리프 텍스트 -> HTML =================
-_HEADERS = ["🎬", "📌", "🎯", "🧩", "⚠️", "⚠", "🕐", "▶"]
+_HEADERS = ["🎬", "📋", "📌", "🎯", "🧩", "⚠️", "⚠", "🕐", "▶"]
 
 
 def _match_header(line):
@@ -310,7 +333,7 @@ def render_brief(body):
         if cur is None:
             if not line.strip():
                 continue
-            cur = ["", "", []]
+            cur = ["📋", "개요", []]
             sections.append(cur)
         cur[2].append(line)
 
@@ -432,8 +455,9 @@ a.back{display:inline-block;font-family:var(--mono);font-size:13px;color:var(--a
 .brief-sec.disc{background:#FBFBFC} .brief-sec.disc .sec-p{font-size:12px;color:var(--muted);line-height:1.7}
 .sec-h{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:700;margin:0 0 10px;padding-bottom:9px;border-bottom:1px solid var(--line)}
 .sec-ic{font-size:16px}
-.sec-p{margin:0 0 8px;font-size:14.5px;color:#28303a}
-ul.blist{margin:6px 0 0;padding-left:18px} ul.blist li{margin:4px 0;font-size:14px} li.plain{list-style:none;margin-left:-18px}
+.sec-p{margin:0 0 8px;font-size:14.5px;color:#28303a;overflow-wrap:anywhere}
+ul.blist{margin:6px 0 0;padding-left:18px} ul.blist li{margin:4px 0;font-size:14px;overflow-wrap:anywhere} li.plain{list-style:none;margin-left:-18px}
+.body{overflow-wrap:anywhere}
 .angle{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:10px 0}
 .angle-h{font-weight:700;font-size:14.5px;display:flex;gap:8px;align-items:baseline} .anum{font-family:var(--mono);color:var(--accent);font-weight:700}
 .scene{background:var(--pm-bg);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:13.5px;color:var(--pm);font-weight:500}
@@ -497,7 +521,7 @@ FOOT = (f"<footer><div>제작자: {html.escape(MAKER)}</div>"
 
 
 # ================= 공용 JS (job 폴링) =================
-def _poll_js(btn, inp, status, endpoint, view_prefix, id_field):
+def _poll_js(btn, inp, status, endpoint, view_prefix, id_field, extra_payload=""):
     return ("""
 document.addEventListener('DOMContentLoaded', function(){
   var go=document.getElementById('%s'), inp=document.getElementById('%s'), st=document.getElementById('%s');
@@ -507,7 +531,7 @@ document.addEventListener('DOMContentLoaded', function(){
     if(!v){ st.textContent='내용을 입력해 주세요.'; return; }
     go.disabled=true;
     st.innerHTML="<span class='spin'></span><span>생성 중입니다… 웹 검색 포함 30초~1분 걸립니다. 이 화면을 닫지 마세요.</span>";
-    fetch('%s',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request:v})})
+    fetch('%s',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request:v%s})})
       .then(function(r){return r.json();})
       .then(function(j){ if(!j.job_id){throw new Error(j.error||'요청 실패');} poll(j.job_id); })
       .catch(function(e){ go.disabled=false; st.textContent='오류: '+e.message; });
@@ -521,7 +545,7 @@ document.addEventListener('DOMContentLoaded', function(){
     }, 3000);
   }
 });
-""" % (btn, inp, status, endpoint, view_prefix, id_field))
+""" % (btn, inp, status, endpoint, extra_payload, view_prefix, id_field))
 
 
 # ================= 라우트 =================
@@ -628,6 +652,15 @@ def plan_form():
             f"<span class='rt'>{html.escape(fmt_time(ts))}</span></a>"
             for pid, ts, req in recents)
         rec_html = f"<div class='recent'><h3>최근 생성한 브리프</h3>{rows}</div>"
+    srecents = list_scripts()
+    srec_html = ""
+    if srecents:
+        srows = "".join(
+            f"<a class='rrow' href='/script/view/{sid}'>"
+            f"<span>🎬 {html.escape((req or '').strip()[:56] or '(제목 없음)')}</span>"
+            f"<span class='rt'>{html.escape(fmt_time(ts))}</span></a>"
+            for sid, ts, req in srecents)
+        srec_html = f"<div class='recent'><h3>최근 만든 스크립트</h3>{srows}</div>"
     disabled = "" if PLAN_FN else "disabled"
     warn = "" if PLAN_FN else "<p class='sub' style='color:var(--am)'>제작 기능이 아직 연결되지 않았습니다.</p>"
     inner = (
@@ -639,42 +672,57 @@ def plan_form():
         "<div class='field'>"
         "<textarea id='req' class='inp' placeholder='예) KODEX 미국우주항공, 우주항공 테마 강세'></textarea>"
         f"<div><button id='go' class='go' {disabled}>브리프 생성</button></div>"
-        "<div id='status' class='statusline'></div></div>" + rec_html + FOOT)
+        "<div id='status' class='statusline'></div></div>" + rec_html + srec_html + FOOT)
     js = _poll_js("go", "req", "status", "/plan/new", "/plan/view/", "plan_id")
     return page("제작 브리프", inner, active="/plan", extra_head=f"<script>{js}</script>")
 
 
 @app.post("/plan/new")
 async def plan_new(req: Request):
-    return await _new_job(req, PLAN_FN, "plans", "plan_id")
+    q, _data, err = await _read_req(req, PLAN_FN)
+    if err:
+        return err
+    return _start_job(PLAN_FN, q, "plan_id", lambda text: _save_plan(q, text))
 
 
 @app.post("/script/new")
 async def script_new(req: Request):
-    return await _new_job(req, SCRIPT_FN, "scripts", "script_id")
+    q, data, err = await _read_req(req, SCRIPT_FN)
+    if err:
+        return err
+    plan_id = data.get("plan_id")
+    try:
+        plan_id = int(plan_id) if plan_id not in (None, "") else None
+    except Exception:
+        plan_id = None
+    return _start_job(SCRIPT_FN, q, "script_id", lambda text: _save_script(q, text, plan_id))
 
 
-async def _new_job(req, fn, table, id_field):
+async def _read_req(req, fn):
     try:
         data = await req.json()
     except Exception:
-        return JSONResponse({"error": "잘못된 요청입니다."}, status_code=400)
+        return None, None, JSONResponse({"error": "잘못된 요청입니다."}, status_code=400)
     q = (data.get("request") or "").strip()
     if not q:
-        return JSONResponse({"error": "내용을 입력해 주세요."}, status_code=400)
+        return None, None, JSONResponse({"error": "내용을 입력해 주세요."}, status_code=400)
     if fn is None:
-        return JSONResponse({"error": "이 기능이 연결되지 않았습니다."}, status_code=503)
+        return None, None, JSONResponse({"error": "이 기능이 연결되지 않았습니다."}, status_code=503)
+    return q, data, None
+
+
+def _start_job(fn, q, id_field, save_fn):
     job_id = uuid.uuid4().hex
     with LOCK:
         JOBS[job_id] = {"status": "pending"}
-    threading.Thread(target=_run_job, args=(job_id, q, fn, table, id_field), daemon=True).start()
+    threading.Thread(target=_run_job, args=(job_id, fn, q, id_field, save_fn), daemon=True).start()
     return JSONResponse({"job_id": job_id})
 
 
-def _run_job(job_id, q, fn, table, id_field):
+def _run_job(job_id, fn, q, id_field, save_fn):
     try:
         text = fn(q)
-        new_id = _save(table, q, text)
+        new_id = save_fn(text)
         with LOCK:
             JOBS[job_id] = {"status": "done", id_field: new_id}
     except Exception as e:
@@ -701,6 +749,15 @@ def plan_view(pid: int):
     _id, ts, request, body = row
     prefill = html.escape((request or "").strip())
     sdisabled = "" if SCRIPT_FN else "disabled"
+    made = scripts_for_plan(pid)
+    made_html = ""
+    if made:
+        mrows = "".join(
+            f"<a class='rrow' href='/script/view/{sid}'>"
+            f"<span>🎬 {html.escape((sreq or '').strip()[:56] or '(스크립트)')}</span>"
+            f"<span class='rt'>{html.escape(fmt_time(sts))}</span></a>"
+            for sid, sts, sreq in made)
+        made_html = f"<div class='recent'><h3>이 브리프로 만든 스크립트</h3>{mrows}</div>"
     script_block = (
         "<section class='brief-sec'>"
         "<h2 class='sec-h'><span class='sec-ic'>🎥</span>이 브리프로 완성 스크립트 만들기</h2>"
@@ -711,8 +768,9 @@ def plan_view(pid: int):
     inner = ("<a class='back' href='/plan'>← 제작 브리프로</a>"
              f"<div class='dmeta' style='margin-top:14px'>입력: {html.escape((request or '').strip()[:120])}"
              f" · {html.escape(fmt_time(ts))}</div>"
-             + render_brief(body) + script_block + FOOT)
-    js = _poll_js("sgo", "sreq", "sstatus", "/script/new", "/script/view/", "script_id")
+             + render_brief(body) + script_block + made_html + FOOT)
+    js = _poll_js("sgo", "sreq", "sstatus", "/script/new", "/script/view/", "script_id",
+                  extra_payload=f", plan_id: {pid}")
     return page("제작 브리프 결과", inner, active="/plan", extra_head=f"<script>{js}</script>")
 
 
@@ -723,8 +781,12 @@ def script_view(sid: int):
         return page("스크립트를 찾을 수 없음",
                     "<a class='back' href='/plan'>← 제작 브리프로</a>"
                     "<div class='empty'>해당 스크립트를 찾을 수 없습니다.</div>", active="/plan")
-    _id, ts, request, body = row
-    inner = ("<a class='back' href='/plan'>← 제작 브리프로</a>"
+    _id, ts, request, body, plan_id = row
+    if plan_id:
+        back = f"<a class='back' href='/plan/view/{plan_id}'>← 이 스크립트의 브리프로</a>"
+    else:
+        back = "<a class='back' href='/plan'>← 제작 브리프로</a>"
+    inner = (back +
              "<h1 class='dtitle' style='margin-top:14px'>완성 스크립트</h1>"
              f"<div class='dmeta'>입력: {html.escape((request or '').strip()[:120])} · {html.escape(fmt_time(ts))}</div>"
              + render_script(body) + FOOT)
