@@ -563,6 +563,7 @@ def start_web():
         import uvicorn
         import web
         web.configure(DB_PATH, web_generate_plan, web_generate_script)
+        web.start_refresher()
         port = int(os.environ.get("PORT", "8080"))
         config = uvicorn.Config(web.app, host="0.0.0.0", port=port, log_level="warning")
         log.info("웹 서버 시작: 0.0.0.0:%s", port)
