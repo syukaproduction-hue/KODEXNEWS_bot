@@ -87,7 +87,12 @@ def db():
     except Exception:
         pass
     conn.execute("""CREATE TABLE IF NOT EXISTS product_news(
-        code TEXT PRIMARY KEY, title TEXT, url TEXT, updated_at TEXT)""")
+        code TEXT PRIMARY KEY, title TEXT, url TEXT, comp_name TEXT, comp_code TEXT, updated_at TEXT)""")
+    for col in ("comp_name", "comp_code"):
+        try:
+            conn.execute(f"ALTER TABLE product_news ADD COLUMN {col} TEXT")  # 기존 테이블 대비
+        except Exception:
+            pass
     return conn
 
 
@@ -186,6 +191,78 @@ def news_get_all():
     rows = conn.execute("SELECT code, title, url FROM product_news").fetchall()
     conn.close()
     return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def news_upsert(code, title, url, comp_name, comp_code):
+    # 오전 브리핑 자동 등록용 (제목·링크·경쟁사 함께 갱신)
+    conn = db()
+    conn.execute(
+        "INSERT INTO product_news(code,title,url,comp_name,comp_code,updated_at) VALUES(?,?,?,?,?,?) "
+        "ON CONFLICT(code) DO UPDATE SET title=excluded.title, url=excluded.url, "
+        "comp_name=excluded.comp_name, comp_code=excluded.comp_code, updated_at=excluded.updated_at",
+        (code, (title or "")[:300], (url or "")[:600],
+         (comp_name or "")[:120], (comp_code or "")[:20], datetime.now(TZ).isoformat()),
+    )
+    conn.commit(); conn.close()
+
+
+# ===================== 오전 브리핑 -> 시황 소재/경쟁사 자동 등록 =====================
+def _parse_competitor(block: str):
+    """소재 후보 블록에서 '참고(경쟁사 유사 ETF)' 줄을 읽어 (이름, 종목코드) 반환. TIGER 우선."""
+    m = re.search(r"경쟁사[^\n:：]*[:：]([^\n]*)", block)
+    if not m:
+        return "", ""
+    after = m.group(1)
+    items = [s.strip() for s in re.split(r"[,、/]", after) if s.strip()]
+    if not items:
+        return "", ""
+    tiger = [it for it in items if "TIGER" in it.upper()]
+    chosen = tiger[0] if tiger else items[0]  # TIGER 1순위, 없으면 나머지 첫 항목
+    cm = re.search(r"\(?\b([0-9A-Z]{6})\b\)?", chosen)
+    code = cm.group(1) if (cm and "확인" not in chosen) else ""
+    name = re.sub(r"\[[^\]]*\]", "", re.sub(r"\([^)]*\)", "", chosen)).strip()
+    return name, code
+
+
+def parse_am_news(text: str):
+    """오전 브리핑에서 '🎯 오늘의 숏폼 소재 후보'를 파싱해 집중 상품별 소재/경쟁사 추출."""
+    if not text:
+        return []
+    m = re.search(r"🎯[^\n]*\n(.*?)(?:\n\s*🗂|\n\s*🏢|\n\s*🚩|\n\s*⚠|\Z)", text, re.S)
+    section = m.group(1) if m else text
+    blocks = re.split(r"\n(?=\s*\d+\.\s)", section)
+    focus = {p["code"]: p["name"] for p in settings.FOCUS_PRODUCTS}
+    results, seen = [], set()
+    for blk in blocks:
+        blk = blk.strip()
+        if not re.match(r"^\d+\.", blk):
+            continue
+        code = next((fc for fc in focus if fc in blk), None)
+        if code is None:
+            code = next((fc for fc, fn in focus.items() if fn and fn[:10] in blk), None)
+        if code is None or code in seen:
+            continue
+        first = blk.split("\n", 1)[0]
+        title = re.sub(r"^\s*\d+\.\s*", "", first).strip().strip("[]").strip()
+        um = re.search(r"https?://[^\s)\]]+", blk)
+        url = um.group(0) if um else ""
+        comp_name, comp_code = _parse_competitor(blk)
+        results.append({"code": code, "title": title[:300], "url": url,
+                        "comp_name": comp_name, "comp_code": comp_code})
+        seen.add(code)
+    return results
+
+
+def apply_am_news(text: str):
+    """파싱 결과를 product_news에 자동 등록. 실패해도 발송을 막지 않는다(무음 실패)."""
+    try:
+        items = parse_am_news(text)
+        for it in items:
+            news_upsert(it["code"], it["title"], it["url"], it["comp_name"], it["comp_code"])
+        if items:
+            log.info("오전 브리핑에서 시황 소재 %d건 자동 등록", len(items))
+    except Exception:
+        log.exception("apply_am_news failed")
 
 
 def month_stats():
@@ -559,6 +636,8 @@ async def _brief_cmd(update, context, pm):
         text, itok, otok = await asyncio.to_thread(generate_brief_sync, pm)
         log_usage(update.effective_chat.id, "pm" if pm else "brief", itok, otok)
         save_briefing("pm" if pm else "am", "manual", text)
+        if not pm:
+            apply_am_news(text)  # 오전 브리핑 뉴스로 시황 소재·경쟁사 자동 세팅
         await send_long(context.bot, update.effective_chat.id, text)
     except Exception as e:
         log.exception("brief failed")
@@ -606,6 +685,8 @@ async def broadcast(context, pm):
         log.exception("auto brief gen failed"); return
     log_usage("AUTO", "pm" if pm else "brief", itok, otok)
     save_briefing("pm" if pm else "am", "auto", text)
+    if not pm:
+        apply_am_news(text)  # 오전 브리핑 뉴스로 시황 소재·경쟁사 자동 세팅
     try:
         await send_long(context.bot, TARGET_CHANNEL_ID, text)
         log.info("자동 %s 브리핑 채널 발송 완료", "오후" if pm else "오전")
