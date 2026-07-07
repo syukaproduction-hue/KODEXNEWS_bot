@@ -418,8 +418,8 @@ def generate_brief_sync(pm: bool = False):
     if pm:
         kospi = fetch_kospi_close()
         if kospi:
-            system_text += ("\n\n## 코스피 마감 (확정 데이터 — 이 값을 '오늘 코스피 마감' 첫 줄에 그대로 쓸 것)\n"
-                            + kospi)
+            system_text += ("\n\n## 코스피 마감 확정 데이터 (아래 숫자를 근거로 '오늘 코스피 마감' 첫 문장을 "
+                            "자연스러운 한 문장으로 쓴다. 숫자는 이 값에서 절대 바꾸지 마라)\n" + kospi)
         else:
             system_text += ("\n\n## 코스피 마감\n확정 종가 데이터를 가져오지 못했다. "
                             "추측하지 말고 '오늘 코스피 마감' 항목을 통째로 생략한다.")
