@@ -86,6 +86,8 @@ def db():
         conn.execute("ALTER TABLE scripts ADD COLUMN plan_id INTEGER")  # 기존 테이블 대비
     except Exception:
         pass
+    conn.execute("""CREATE TABLE IF NOT EXISTS product_news(
+        code TEXT PRIMARY KEY, title TEXT, url TEXT, updated_at TEXT)""")
     return conn
 
 
@@ -161,6 +163,29 @@ def save_script(request, body, plan_id=None):
         conn.commit(); conn.close()
     except Exception:
         log.exception("save_script failed")
+
+
+def news_set(code, title, url):
+    conn = db()
+    conn.execute(
+        "INSERT INTO product_news(code,title,url,updated_at) VALUES(?,?,?,?) "
+        "ON CONFLICT(code) DO UPDATE SET title=excluded.title, url=excluded.url, updated_at=excluded.updated_at",
+        (code, (title or "")[:300], (url or "")[:600], datetime.now(TZ).isoformat()),
+    )
+    conn.commit(); conn.close()
+
+
+def news_clear(code):
+    conn = db()
+    conn.execute("DELETE FROM product_news WHERE code=?", (code,))
+    conn.commit(); conn.close()
+
+
+def news_get_all():
+    conn = db()
+    rows = conn.execute("SELECT code, title, url FROM product_news").fetchall()
+    conn.close()
+    return {r[0]: (r[1], r[2]) for r in rows}
 
 
 def month_stats():
@@ -402,6 +427,49 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"이 채팅 ID: {update.effective_chat.id}")
 
 
+async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 운영자 전용: 웹 '시황 데이터'에 뜨는 상품별 '오늘의 시황 숏폼 소재' 기사 등록.
+    if ADMIN_CHAT_ID and str(update.effective_chat.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("이 명령은 운영자만 사용할 수 있어요.")
+        return
+    products = settings.FOCUS_PRODUCTS
+    args = context.args
+    if not args:
+        cur = news_get_all()
+        lines = ["📰 오늘의 시황 숏폼 소재 (웹 '시황 데이터'에 표시)", ""]
+        for i, p in enumerate(products, 1):
+            title = cur.get(p["code"], (None, None))[0]
+            state = f"→ {title}" if title else "→ (미설정)"
+            lines.append(f"{i}. {p['name']} ({p['code']}) {state}")
+        lines += ["", "등록: /news [번호] [기사제목] | [링크]",
+                  "예) /news 1 삼성전자 실적 서프라이즈에 시장 술렁 | https://...",
+                  "삭제: /news [번호] 삭제"]
+        await update.message.reply_text("\n".join(lines))
+        return
+    try:
+        idx = int(args[0])
+        assert 1 <= idx <= len(products)
+    except Exception:
+        await update.message.reply_text(f"상품 번호는 1~{len(products)} 사이여야 합니다. /news 로 목록을 확인하세요.")
+        return
+    code = products[idx - 1]["code"]
+    rest = " ".join(args[1:]).strip()
+    if rest in ("삭제", "clear", "삭제.", "-"):
+        news_clear(code)
+        await update.message.reply_text(f"{products[idx-1]['name']} 소재를 삭제했습니다.")
+        return
+    if not rest:
+        await update.message.reply_text("기사 제목을 입력해 주세요. 예) /news 1 제목 | https://링크")
+        return
+    parts = [s.strip() for s in rest.split("|", 1)]
+    title = parts[0]
+    url = parts[1] if len(parts) > 1 else ""
+    news_set(code, title, url)
+    await update.message.reply_text(
+        f"등록했습니다 · {products[idx-1]['name']}\n제목: {title}\n링크: {url or '(없음)'}\n"
+        "웹 '시황 데이터' 화면에서 확인하세요.")
+
+
 async def cmd_marketdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 운영자 전용: 공개 데이터(네이버금융) 조회가 정상인지 확인하는 진단 명령.
     if ADMIN_CHAT_ID and str(update.effective_chat.id) != ADMIN_CHAT_ID:
@@ -586,6 +654,7 @@ def main():
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("marketdata", cmd_marketdata))
+    app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("pm", cmd_pm))
     app.add_handler(CommandHandler("script", cmd_script))
