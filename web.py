@@ -54,7 +54,12 @@ def _con():
     except Exception:
         pass
     con.execute("""CREATE TABLE IF NOT EXISTS product_news(
-        code TEXT PRIMARY KEY, title TEXT, url TEXT, updated_at TEXT)""")
+        code TEXT PRIMARY KEY, title TEXT, url TEXT, comp_name TEXT, comp_code TEXT, updated_at TEXT)""")
+    for col in ("comp_name", "comp_code"):
+        try:
+            con.execute(f"ALTER TABLE product_news ADD COLUMN {col} TEXT")  # 기존 테이블 대비
+        except Exception:
+            pass
     return con
 
 
@@ -158,8 +163,15 @@ CHART_DAYS = 20
 
 
 def _competitors():
-    # settings.COMPETITORS = { "집중상품코드": {"name": "TIGER OOO", "code": "종목코드"}, ... }
-    return getattr(settings, "COMPETITORS", {}) or {}
+    # 우선순위: settings.COMPETITORS(수동, 최우선) > 오전 브리핑 자동 등록(product_news)
+    # 형식: { "집중상품코드": {"name": "TIGER OOO", "code": "종목코드"} }
+    merged = {}
+    for code, n in get_all_news().items():
+        if n.get("comp_code") or n.get("comp_name"):
+            merged[code] = {"name": n.get("comp_name") or "", "code": n.get("comp_code") or ""}
+    manual = getattr(settings, "COMPETITORS", {}) or {}
+    merged.update(manual)
+    return merged
 
 
 def refresh_market_cache():
@@ -168,11 +180,15 @@ def refresh_market_cache():
         kospi = market_data.index_daily_series("KOSPI", CHART_DAYS)
         comp = {}
         for fcode, c in _competitors().items():
-            try:
-                comp[fcode] = {"name": c.get("name", ""), "code": c.get("code", ""),
-                               "series": market_data.daily_series(c.get("code", ""), CHART_DAYS)}
-            except Exception:
-                pass
+            name = c.get("name", "")
+            ccode = c.get("code", "")
+            series = []
+            if ccode:
+                try:
+                    series = market_data.daily_series(ccode, CHART_DAYS)
+                except Exception:
+                    series = []
+            comp[fcode] = {"name": name, "code": ccode, "series": series}
         with _MKT_LOCK:
             _MKT["focus"], _MKT["kospi"], _MKT["comp"], _MKT["ts"] = focus, kospi, comp, time.time()
     except Exception:
@@ -198,8 +214,9 @@ def start_refresher():
 
 
 def get_all_news():
-    rows = _rows("SELECT code, title, url, updated_at FROM product_news")
-    return {r[0]: {"title": r[1], "url": r[2], "updated_at": r[3]} for r in rows}
+    rows = _rows("SELECT code, title, url, comp_name, comp_code, updated_at FROM product_news")
+    return {r[0]: {"title": r[1], "url": r[2], "comp_name": r[3], "comp_code": r[4], "updated_at": r[5]}
+            for r in rows}
 
 
 def _fmt_num(v, dec=0):
@@ -279,7 +296,7 @@ def _product_block(name, code, series, gid):
     arrow = "▲" if up else ("▼" if down else "-")
     rate_s = f"{arrow} {abs(rate):.2f}%" if rate is not None else ""
     hi, lo = max(closes), min(closes)
-    color = _trend_color(series)
+    color = UP_RED if up else (DOWN_BLUE if down else "#334155")
     chart = (f"<div class='pricebox'>"
              f"<span class='plabel top'>고 {_fmt_num(hi)}</span>"
              f"<span class='plabel bot'>저 {_fmt_num(lo)}</span>"
@@ -301,6 +318,7 @@ def _news_mood_request(name, code, news):
 
 def _data_card(name, code, series, gid, competitor=None, news=None, news_slot=True):
     comp_ok = competitor and len(competitor.get("series") or []) >= 2
+    comp_note = ""
     if comp_ok:
         body = ("<div class='compare'>"
                 "<div class='compare-col'><div class='rolelab our'>우리 · KODEX</div>"
@@ -311,6 +329,10 @@ def _data_card(name, code, series, gid, competitor=None, news=None, news_slot=Tr
                 "</div>")
     else:
         body = _product_block(name, code, series, gid)
+        if competitor and competitor.get("name"):
+            comp_note = (f"<div class='compnote'>경쟁사 유사 ETF(참고): "
+                         f"{html.escape(competitor['name'])}"
+                         "<span class='compnote-sub'> · 종목코드가 확인되면 그래프가 나란히 표시됩니다</span></div>")
     newsblock = ""
     if news_slot:
         if news and news.get("title"):
@@ -327,8 +349,9 @@ def _data_card(name, code, series, gid, competitor=None, news=None, news_slot=Tr
                 f"{html.escape(news['title'])}</a>{meta}{btn}</div>")
         else:
             newsblock = ("<div class='newsbox nb-empty'>오늘의 시황 숏폼 소재가 아직 없습니다. "
-                         "텔레그램 봇에서 <code>/news</code> 명령으로 등록하세요.</div>")
-    return f"<div class='dcard'>{body}{newsblock}</div>"
+                         "평일 오전 9시 브리핑이 나오면 자동으로 채워집니다. "
+                         "(텔레그램 봇 <code>/news</code> 명령으로 직접 등록·수정도 가능)</div>")
+    return f"<div class='dcard'>{body}{comp_note}{newsblock}</div>"
 
 
 # ================= 제작 브리프 텍스트 -> HTML =================
@@ -583,6 +606,8 @@ a.newslink:hover{color:var(--accent);text-decoration:underline}
 .newsstatus{margin-top:8px}
 .newsbox.nb-empty{color:var(--muted);font-size:13px}
 .newsbox.nb-empty code{font-family:var(--mono);background:var(--bg);padding:2px 6px;border-radius:6px;color:var(--ink)}
+.compnote{margin-top:10px;font-size:12.5px;color:#5B6472;background:#EEF1F4;border-radius:8px;padding:8px 10px;overflow-wrap:anywhere}
+.compnote-sub{color:var(--muted)}
 .footer{}
 footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
 footer div{margin:2px 0}
