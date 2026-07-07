@@ -120,3 +120,63 @@ def notable_focus_products():
         lines.append(f"- {name}({code}): 직전 영업일 종가 {d['close']}, "
                      f"등락률 {sign}{d['rate']:.2f}%{vol_part}")
     return "\n".join(lines)
+
+
+# ===================== 시각화용: 최근 거래일 시세 흐름 =====================
+def _series_from_price_rows(rows, days):
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        date_raw = (row.get("localTradedAt") or row.get("localDate") or row.get("dt") or "")
+        ymd = _digits(date_raw)[:8]
+        close = _to_float(row.get("closePrice") or row.get("nv"))
+        if not ymd or close is None:
+            continue
+        out.append({
+            "ymd": ymd,
+            "close": close,
+            "rate": _to_float(row.get("fluctuationsRatio") or row.get("cr")),
+            "vol": _to_float(row.get("accumulatedTradingVolume") or row.get("aq")),
+        })
+    out.sort(key=lambda o: o["ymd"])   # 오래된 -> 최신
+    return out[-days:]
+
+
+def daily_series(code, days=20):
+    """종목의 최근 days 거래일 (날짜/종가/등락률/거래량) 리스트. 실패하면 []."""
+    try:
+        url = f"https://m.stock.naver.com/api/stock/{code}/price?pageSize={days + 4}&page=1"
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        rows = data if isinstance(data, list) else (
+            data.get("datas") or data.get("priceInfos") or [])
+        return _series_from_price_rows(rows, days)
+    except Exception:
+        return []
+
+
+def index_daily_series(index="KOSPI", days=20):
+    """지수(KOSPI 등)의 최근 days 거래일 흐름. 실패하면 []."""
+    try:
+        url = f"https://m.stock.naver.com/api/index/{index}/price?pageSize={days + 4}&page=1"
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        rows = data if isinstance(data, list) else (
+            data.get("datas") or data.get("priceInfos") or [])
+        return _series_from_price_rows(rows, days)
+    except Exception:
+        return []
+
+
+def focus_series(days=20):
+    """FOCUS_PRODUCTS 각 상품의 최근 흐름. [{name, code, series}] 형태."""
+    result = []
+    for p in settings.FOCUS_PRODUCTS:
+        result.append({"name": p["name"], "code": p["code"],
+                       "series": daily_series(p["code"], days)})
+    return result
