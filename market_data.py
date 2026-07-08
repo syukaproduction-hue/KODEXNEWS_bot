@@ -115,10 +115,9 @@ def notable_focus_products():
     rows.sort(key=lambda x: abs(x[2]["rate"]), reverse=True)
     lines = []
     for name, code, d in rows:
-        sign = "+" if d["rate"] > 0 else ""
-        vol_part = f", 거래량 {d['vol']}주" if d.get("vol") else ""
-        lines.append(f"- {name}({code}): 직전 영업일 종가 {d['close']}, "
-                     f"등락률 {sign}{d['rate']:.2f}%{vol_part}")
+        arrow = "▲" if d["rate"] > 0 else ("▼" if d["rate"] < 0 else "→")
+        vol_part = f" · 거래량 {d['vol']}주" if d.get("vol") else ""
+        lines.append(f"· {name} ({code}): {d['close']}원 {arrow}{abs(d['rate']):.2f}%{vol_part}")
     return "\n".join(lines)
 
 
