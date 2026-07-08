@@ -329,6 +329,15 @@ def clean_for_telegram(text: str) -> str:
         line = re.sub(r"^\s*>\s?", "", line)
         line = re.sub(r"^(\s*)[*+]\s+", r"\1· ", line)
         line = re.sub(r"\*([^*\n]+)\*", r"\1", line)
+        # 마크다운 표(| |)는 텔레그램에서 깨진다 → 구분선은 버리고, 표 행은 ' · '로 푼다. (전각 │ 는 건드리지 않음)
+        if "|" in line and re.fullmatch(r"[\s|:\-]+", line.strip()):
+            continue
+        if line.count("|") >= 2:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            cells = [c for c in cells if c]
+            if not cells:
+                continue
+            line = "· " + " · ".join(cells)
         if re.fullmatch(r"\s*(-{3,}|\*{3,}|_{3,})\s*", line):
             continue
         if re.fullmatch(r"\s*[-·*•]\s*", line):
@@ -427,10 +436,10 @@ def generate_brief_sync(pm: bool = False):
         notable = market_data.notable_focus_products()
         if notable:
             system_text += (
-                "\n\n## 어제 눈에 띈 집중 상품 (공개 데이터 · 네이버금융 기준)\n"
-                "아래는 직전 영업일 집중 상품 시세다. '📊 어제 집중 상품 움직임' 항목과 "
-                "소재 후보 판단에 참고한다. 출처는 '네이버금융 시세'로 표기한다. "
-                "집중 상품을 임의로 바꾸거나 투자권유로 쓰지 않는다.\n" + notable)
+                "\n\n## 어제 집중 상품 움직임 데이터 (공개 데이터 · 네이버금융)\n"
+                "아래 줄들을 '📊 어제 집중 상품 움직임 (출처: 네이버금융 시세)' 항목에 각 상품 한 줄씩 그대로 넣는다. "
+                "표(| 기호)나 마크다운으로 만들지 말고, 제공된 줄 형식·순서를 바꾸지 마라. "
+                "소재 후보 판단에도 참고하되 집중 상품을 임의로 바꾸거나 투자권유로 쓰지 않는다.\n" + notable)
     user = "오늘의 KODEX 장 마감 브리핑을 작성해줘." if pm else "오늘의 KODEX 시황 브리핑을 작성해줘."
     return _call(system_text, user)
 
