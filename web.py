@@ -1147,7 +1147,7 @@ def report_view():
     inner = (
         "<header class='mast'><p class='eyebrow'>Weekly Report</p>"
         "<h1 class='title'>주간 리포트</h1>"
-        f"<p class='sub'>{html.escape(rng)} · 최근 7일 활동 요약입니다. 고객사 공유용으로 이 링크를 그대로 전달하셔도 됩니다.</p></header>"
+        f"<p class='sub'>{html.escape(rng)} · 최근 7일 활동 요약입니다. </p></header>"
         + stats + verdict_html + focus_html + briefs_html + scripts_html + FOOT)
     return page("주간 리포트", inner, active="/report")
 
