@@ -54,6 +54,7 @@ PROMPT_AM = BASE / "briefing_prompt.md"
 PROMPT_PM = BASE / "briefing_pm_prompt.md"
 SCRIPT_PROMPT = BASE / "script_prompt.md"
 BRIEF_PROMPT = BASE / "brief_prompt.md"
+CHECK_PROMPT = BASE / "check_prompt.md"
 
 # DB 위치: Railway 볼륨을 /data 에 연결하면 영구 보존됨. 없으면 로컬 파일로 동작.
 DB_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -405,14 +406,16 @@ def build_products_block() -> str:
 
 
 # ===================== Claude 호출 =====================
-def _call(system_text, user_text):
-    resp = anthropic_client.messages.create(
+def _call(system_text, user_text, use_search=True):
+    kwargs = dict(
         model=settings.MODEL,
         max_tokens=settings.MAX_TOKENS,
         system=system_text,
         messages=[{"role": "user", "content": user_text}],
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
     )
+    if use_search:
+        kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+    resp = anthropic_client.messages.create(**kwargs)
     parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
     text = clean_for_telegram("\n".join(p for p in parts if p).strip())
     in_tok = getattr(resp.usage, "input_tokens", 0) or 0
@@ -468,6 +471,19 @@ def web_generate_script(req: str):
     return text
 
 
+def generate_check_sync(text_in: str):
+    system_text = CHECK_PROMPT.read_text(encoding="utf-8")
+    # 컴플 점검은 콘텐츠 문구 자체를 보는 것이라 웹검색이 필요 없다(빠르고 저렴).
+    return _call(system_text, f"다음 콘텐츠의 컴플라이언스 위험을 점검해줘:\n\n{text_in}", use_search=False)
+
+
+def web_generate_check(text_in: str):
+    # 웹 '컴플 셀프체크'에서 호출.
+    text, itok, otok = generate_check_sync(text_in)
+    log_usage("WEB", "check", itok, otok)
+    return text
+
+
 # ===================== 발송 =====================
 async def send_long(bot, chat_id, text: str):
     if len(text) <= TG_LIMIT:
@@ -493,6 +509,7 @@ WELCOME = (
     "채널에서는 명령을 쓸 수 없어요. 아래 명령은 봇과의 1:1 대화나 봇을 추가한 그룹방에서 사용하세요.\n"
     "· /plan KODEX AI전력핵심설비  (제작 브리프: 스토리·컴플·톤 기획)\n"
     "· /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로  (숏폼 스크립트 작성)\n"
+    "· /check [대본·캡션 붙여넣기]  (컴플라이언스 셀프체크 — 위험 표현 점검)\n"
     "· /brief  (지금 오전형 브리핑 받기)\n"
     "· /pm  (지금 오후형 장중 브리핑 받기)\n"
 )
@@ -618,6 +635,24 @@ async def cmd_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"스크립트 생성 중 오류가 발생했습니다: {e}")
 
 
+async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    req = " ".join(context.args).strip()
+    if not req:
+        await update.message.reply_text(
+            "사용법: /check 다음에 점검할 대본·캡션·문구를 붙여넣으세요.\n"
+            "단정적 투자권유·수익 보장·미확인 인과 단정·수수료/위험등급/심사필 누락 등 위험 표현을 짚어 드립니다.\n"
+            "예) /check 지금 이 ETF 무조건 담으세요. 반드시 오릅니다.")
+        return
+    await update.message.reply_text("컴플라이언스 셀프체크 중입니다… (10~30초)")
+    try:
+        text, itok, otok = await asyncio.to_thread(generate_check_sync, req)
+        log_usage(update.effective_chat.id, "check", itok, otok)
+        await send_long(context.bot, update.effective_chat.id, text)
+    except Exception as e:
+        log.exception("check failed")
+        await update.message.reply_text(f"컴플 체크 중 오류가 발생했습니다: {e}")
+
+
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     req = " ".join(context.args).strip()
     if not req:
@@ -724,7 +759,7 @@ def start_web():
     try:
         import uvicorn
         import web
-        web.configure(DB_PATH, web_generate_plan, web_generate_script)
+        web.configure(DB_PATH, web_generate_plan, web_generate_script, web_generate_check)
         web.start_refresher()
         port = int(os.environ.get("PORT", "8080"))
         config = uvicorn.Config(web.app, host="0.0.0.0", port=port, log_level="warning")
@@ -748,6 +783,7 @@ def main():
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("pm", cmd_pm))
     app.add_handler(CommandHandler("script", cmd_script))
+    app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
