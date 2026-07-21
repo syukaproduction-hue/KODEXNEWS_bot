@@ -82,11 +82,13 @@ def db():
     conn.execute("""CREATE TABLE IF NOT EXISTS plans(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS scripts(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT, plan_id INTEGER)""")
-    try:
-        conn.execute("ALTER TABLE scripts ADD COLUMN plan_id INTEGER")  # 기존 테이블 대비
-    except Exception:
-        pass
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT, plan_id INTEGER,
+        check_verdict TEXT, check_at TEXT)""")
+    for col, typ in (("plan_id", "INTEGER"), ("check_verdict", "TEXT"), ("check_at", "TEXT")):
+        try:
+            conn.execute(f"ALTER TABLE scripts ADD COLUMN {col} {typ}")  # 기존 테이블 대비
+        except Exception:
+            pass
     conn.execute("""CREATE TABLE IF NOT EXISTS product_news(
         code TEXT PRIMARY KEY, title TEXT, url TEXT, comp_name TEXT, comp_code TEXT, updated_at TEXT)""")
     for col in ("comp_name", "comp_code"):
