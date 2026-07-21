@@ -5,15 +5,22 @@ KODEX 시황 브리핑 — 통합 웹 (홈 / 텔레그램 봇 안내 / 아카이
 """
 
 import re
+import os
 import html
+import json
 import time
 import uuid
+import hashlib
 import sqlite3
 import threading
+from pathlib import Path
+from urllib.parse import quote
 from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
+from fastapi.responses import (
+    HTMLResponse, PlainTextResponse, JSONResponse, RedirectResponse, Response,
+)
 
 import market_data
 import settings
@@ -28,6 +35,16 @@ BOT_LINK = "https://t.me/kodex_economy"
 MAKER = "주식회사 슈카친구들"
 KST = timezone(timedelta(hours=9))
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
+
+# 접근 비밀번호(게이트). Railway에 WEB_PASSWORD를 넣으면 그 값이 우선, 없으면 기본 'KODEX'.
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "KODEX")
+AUTH_TOKEN = hashlib.sha256(("kdx:" + WEB_PASSWORD).encode()).hexdigest()
+AUTH_COOKIE = "kdx_auth"
+GATE_EXEMPT = {"/login", "/login/auth", "/robots.txt", "/logo.svg"}
+
+_BASE = Path(__file__).parent
+LOGO_PATH = _BASE / "logo_kodex_ko.svg"
+_LOGO_CACHE = None
 
 JOBS = {}
 LOCK = threading.Lock()
@@ -50,11 +67,13 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS plans(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS scripts(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT, plan_id INTEGER)""")
-    try:
-        con.execute("ALTER TABLE scripts ADD COLUMN plan_id INTEGER")  # 기존 테이블 대비
-    except Exception:
-        pass
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT, plan_id INTEGER,
+        check_verdict TEXT, check_at TEXT)""")
+    for col, typ in (("plan_id", "INTEGER"), ("check_verdict", "TEXT"), ("check_at", "TEXT")):
+        try:
+            con.execute(f"ALTER TABLE scripts ADD COLUMN {col} {typ}")  # 기존 테이블 대비
+        except Exception:
+            pass
     con.execute("""CREATE TABLE IF NOT EXISTS product_news(
         code TEXT PRIMARY KEY, title TEXT, url TEXT, comp_name TEXT, comp_code TEXT, updated_at TEXT)""")
     for col in ("comp_name", "comp_code"):
@@ -97,16 +116,67 @@ def get_plan(pid):
 
 
 def get_script(sid):
-    r = _rows("SELECT id, ts, request, body, plan_id FROM scripts WHERE id=?", (sid,))
+    r = _rows("SELECT id, ts, request, body, plan_id, check_verdict FROM scripts WHERE id=?", (sid,))
     return r[0] if r else None
 
 
 def list_scripts(limit=50):
-    return _rows("SELECT id, ts, request FROM scripts ORDER BY id DESC LIMIT ?", (limit,))
+    return _rows("SELECT id, ts, request, check_verdict FROM scripts ORDER BY id DESC LIMIT ?", (limit,))
 
 
 def scripts_for_plan(pid):
-    return _rows("SELECT id, ts, request FROM scripts WHERE plan_id=? ORDER BY id DESC", (pid,))
+    return _rows("SELECT id, ts, request, check_verdict FROM scripts WHERE plan_id=? ORDER BY id DESC", (pid,))
+
+
+def _week_cutoff_iso():
+    return (datetime.now(KST) - timedelta(days=7)).isoformat()
+
+
+def report_counts():
+    cut = _week_cutoff_iso()
+
+    def n(sql, args=()):
+        r = _rows(sql, args)
+        return (r[0][0] if r and r[0] and r[0][0] is not None else 0)
+
+    verd = _rows("SELECT check_verdict, COUNT(*) FROM scripts "
+                 "WHERE ts>=? AND check_verdict IS NOT NULL AND check_verdict<>'' GROUP BY check_verdict", (cut,))
+    return {
+        "am": n("SELECT COUNT(*) FROM briefings WHERE kind='am' AND ts>=?", (cut,)),
+        "pm": n("SELECT COUNT(*) FROM briefings WHERE kind='pm' AND ts>=?", (cut,)),
+        "plans": n("SELECT COUNT(*) FROM plans WHERE ts>=?", (cut,)),
+        "scripts": n("SELECT COUNT(*) FROM scripts WHERE ts>=?", (cut,)),
+        "checks": n("SELECT COUNT(*) FROM usage_log WHERE kind='check' AND ts>=?", (cut,)),
+        "verdicts": {r[0]: r[1] for r in verd},
+    }
+
+
+def _extract_verdict(text):
+    for line in (text or "").split("\n"):
+        s = line.strip()
+        if s.startswith("판정"):
+            v = (s.split(":", 1)[1] if ":" in s else s.replace("판정", "")).strip()
+            if "통과" in v:
+                return "통과"
+            if "수정" in v:
+                return "수정 필요"
+            if "주의" in v:
+                return "주의"
+    return ""
+
+
+def save_check_verdict(sid, verdict):
+    if not sid or not verdict:
+        return
+    con = _con()
+    try:
+        con.execute("UPDATE scripts SET check_verdict=?, check_at=? WHERE id=?",
+                    (verdict, datetime.now(KST).isoformat(), int(sid)))
+        con.commit()
+    except Exception:
+        pass
+    finally:
+        con.close()
 
 
 def _save_plan(request, body):
@@ -550,6 +620,13 @@ def render_check(text):
     return f"<div class='checkbox'>{badge}{''.join(parts)}</div>"
 
 
+def verdict_badge(v):
+    if not v:
+        return ""
+    cls = "ok" if "통과" in v else ("bad" if "수정" in v else "warn")
+    return f"<span class='vbadge {cls}'>{html.escape(v)}</span>"
+
+
 # ================= HTML 뼈대 =================
 CSS = """
 :root{
@@ -616,6 +693,21 @@ textarea.inp-tall{min-height:160px}
 .chead{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--ink);margin:12px 0 6px}
 .checkbox .cp{margin:6px 0;font-size:14px;color:#28303a;overflow-wrap:anywhere}
 ul.clist{margin:4px 0 8px;padding-left:18px} ul.clist li{margin:5px 0;font-size:14px;overflow-wrap:anywhere}
+.vbadge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;margin-left:6px;vertical-align:middle}
+.vbadge.ok{color:#0F7A3D;background:#E5F5EC} .vbadge.warn{color:var(--am);background:var(--am-bg)} .vbadge.bad{color:#D31A2B;background:#FBE7E9}
+.statgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:6px 0 20px}
+.statcard{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px}
+.stbig{font-size:28px;font-weight:800;letter-spacing:-.02em;color:var(--accent)}
+.stlab{font-size:13px;font-weight:600;margin-top:2px}
+.stsub{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:3px}
+.rsec{margin:22px 0}
+.rsec h3{font-size:14px;margin:0 0 10px}
+.vdist{font-size:14px}
+.wprow{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}
+.wpname{font-size:14px;font-weight:600}
+.wchg{font-family:var(--mono);font-size:13px;font-weight:700;white-space:nowrap}
+.wchg.up{color:#D31A2B} .wchg.down{color:#0B4EA2}
+.wchg .muted{color:var(--muted);font-weight:400}
 button.go{margin-top:10px;background:var(--accent);color:#fff;border:0;border-radius:10px;font-size:15px;font-weight:600;padding:12px 20px;cursor:pointer}
 button.go:disabled{opacity:.55;cursor:default}
 .statusline{margin-top:14px;font-size:14px;color:var(--muted);display:flex;align-items:center;gap:10px;min-height:22px}
@@ -657,6 +749,16 @@ a.newslink:hover{color:var(--accent);text-decoration:underline}
 footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
 footer div{margin:2px 0}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.brand{display:flex;align-items:center;gap:8px}
+.brandlogo{height:19px;width:auto;display:block}
+.brandsub{font-weight:800;font-size:14px;color:var(--muted);letter-spacing:-.01em}
+.login-wrap{max-width:400px;margin:0 auto;padding:64px 22px;min-height:100vh;display:flex;flex-direction:column;justify-content:center}
+.login-card{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:32px 26px;box-shadow:0 8px 30px rgba(16,20,24,.06)}
+.login-logo{height:30px;width:auto;display:block;margin:0 auto 8px}
+.login-card h1{font-size:17px;text-align:center;margin:6px 0 4px}
+.login-card p.sub{text-align:center;font-size:13px;margin:0 0 20px}
+.login-card input{width:100%;padding:13px 14px;font-size:16px;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--ink);margin-bottom:12px}
+.login-card input:focus{outline:none;border-color:var(--accent);background:var(--surface)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 """
 
@@ -666,12 +768,14 @@ FONT = ('<link rel="stylesheet" '
 
 def _nav(active):
     items = [("/", "홈"), ("/bot", "텔레그램 봇"), ("/archive", "아카이브"),
-             ("/plan", "제작 브리프"), ("/check", "컴플 체크"), ("/data", "데이터")]
+             ("/plan", "제작 브리프"), ("/check", "컴플 체크"), ("/report", "주간 리포트"),
+             ("/data", "데이터")]
     links = "".join(
         f"<a href='{href}' class='{'on' if active == href else ''}'>{html.escape(label)}</a>"
         for href, label in items)
     return ("<div class='topbar'><div class='in'>"
-            "<a class='brand' href='/'>KODEX 시황</a>"
+            "<a class='brand' href='/'><img class='brandlogo' src='/logo.svg' alt='KODEX'>"
+            "<span class='brandsub'>시황</span></a>"
             f"<nav class='nav'>{links}</nav></div></div>")
 
 
@@ -686,7 +790,8 @@ def page(title, inner, active="", extra_head=""):
 
 
 FOOT = (f"<footer><div>제작자: {html.escape(MAKER)}</div>"
-        "<div>본 페이지는 콘텐츠 기획 참고용입니다. 모든 수치·주가·뉴스는 사용 전 원문 및 준법 확인이 필요합니다.</div></footer>")
+        "<div>본 페이지는 콘텐츠 기획 참고용입니다. 모든 수치·주가·뉴스는 사용 전 원문 및 준법 확인이 필요합니다.</div>"
+        "<div><a href='/logout' style='color:var(--muted)'>로그아웃</a></div></footer>")
 
 
 # ================= 공용 JS (job 폴링) =================
@@ -788,6 +893,93 @@ def robots():
     return "User-agent: *\nDisallow: /\n"
 
 
+# ---------- 접근 게이트 (비밀번호) ----------
+def _authed(request):
+    return request.cookies.get(AUTH_COOKIE) == AUTH_TOKEN
+
+
+@app.middleware("http")
+async def _gate(request: Request, call_next):
+    path = request.url.path
+    if path in GATE_EXEMPT or _authed(request):
+        return await call_next(request)
+    nxt = path + (("?" + request.url.query) if request.url.query else "")
+    return RedirectResponse("/login?next=" + quote(nxt, safe=""), status_code=302)
+
+
+@app.get("/logo.svg")
+def logo_svg():
+    global _LOGO_CACHE
+    if _LOGO_CACHE is None:
+        try:
+            _LOGO_CACHE = LOGO_PATH.read_text(encoding="utf-8")
+        except Exception:
+            _LOGO_CACHE = ""
+    if not _LOGO_CACHE:
+        return Response(status_code=404)
+    return Response(_LOGO_CACHE, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    if _authed(request):
+        return RedirectResponse("/", status_code=302)
+    nxt = request.query_params.get("next", "/")
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/"
+    js = ("<script>var NEXT=" + json.dumps(nxt) + ";"
+          "document.addEventListener('DOMContentLoaded',function(){"
+          "var go=document.getElementById('lgo'),inp=document.getElementById('lpw'),st=document.getElementById('lst');"
+          "function submit(){var v=inp.value||'';if(!v){st.textContent='비밀번호를 입력하세요.';return;}"
+          "go.disabled=true;st.textContent='확인 중…';"
+          "fetch('/login/auth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:v,next:NEXT})})"
+          ".then(function(r){return r.json();}).then(function(j){if(j.ok){location.href=j.next||'/';}else{go.disabled=false;st.textContent=j.error||'실패';}})"
+          ".catch(function(){go.disabled=false;st.textContent='오류가 발생했습니다.';});}"
+          "go.addEventListener('click',submit);inp.addEventListener('keydown',function(e){if(e.key==='Enter')submit();});"
+          "inp.focus();});</script>")
+    body = (
+        "<div class='login-wrap'><div class='login-card'>"
+        "<img class='login-logo' src='/logo.svg' alt='KODEX'>"
+        "<h1>시황 콘텐츠 허브</h1>"
+        "<p class='sub'>접근하려면 비밀번호를 입력하세요.</p>"
+        "<input id='lpw' type='password' placeholder='비밀번호' autocomplete='current-password'>"
+        "<button id='lgo' class='go' style='width:100%'>들어가기</button>"
+        "<div id='lst' class='statusline' style='justify-content:center'></div>"
+        "</div></div>")
+    return HTMLResponse(
+        "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0B4EA2'>"
+        f"<title>로그인 · KODEX 시황</title>{FONT}<style>{CSS}</style>{js}</head>"
+        f"<body>{body}</body></html>")
+
+
+@app.post("/login/auth")
+async def login_auth(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "잘못된 요청입니다."}, status_code=400)
+    pw = data.get("password") or ""
+    nxt = data.get("next") or "/"
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/"
+    if pw != WEB_PASSWORD:
+        return JSONResponse({"ok": False, "error": "비밀번호가 올바르지 않습니다."})
+    resp = JSONResponse({"ok": True, "next": nxt})
+    resp.set_cookie(AUTH_COOKIE, AUTH_TOKEN, max_age=60 * 60 * 24 * 30,
+                    httponly=True, samesite="lax")
+    return resp
+
+
+@app.get("/logout")
+def logout():
+    resp = RedirectResponse("/login", status_code=302)
+    resp.delete_cookie(AUTH_COOKIE)
+    return resp
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     inner = (
@@ -804,6 +996,8 @@ def home():
         "<h3>제작 브리프</h3><p>밀고 싶은 상품·이슈를 넣으면 스토리 앵글·컴플·톤을 기획하고, 완성 스크립트까지 만듭니다.</p></a>"
         "<a class='tile' href='/check'><div class='tic'>🛡️</div>"
         "<h3>컴플 셀프체크</h3><p>대본·캡션을 넣으면 단정적 투자권유·수익 보장·미확인 인과 단정 등 위험 표현을 점검합니다.</p></a>"
+        "<a class='tile' href='/report'><div class='tic'>📅</div>"
+        "<h3>주간 리포트</h3><p>최근 7일 산출물·컴플 판정·집중 상품 흐름을 한 페이지로. 고객사 공유용.</p></a>"
         "<a class='tile' href='/data'><div class='tic'>📊</div>"
         "<h3>시황 데이터</h3><p>집중 상품의 최근 흐름을 공개 데이터 기반 그래프로 봅니다.</p></a>"
         "</div>" + FOOT)
@@ -881,6 +1075,83 @@ def check_form():
     return page("컴플라이언스 셀프체크", inner, active="/check", extra_head=f"<script>{CHECK_JS}</script>")
 
 
+@app.get("/report", response_class=HTMLResponse)
+def report_view():
+    c = report_counts()
+    now = datetime.now(KST)
+    start = now - timedelta(days=7)
+    rng = f"{start.month}월 {start.day}일 ~ {now.month}월 {now.day}일"
+
+    def card(label, big, sub):
+        return (f"<div class='statcard'><div class='stbig'>{big}</div>"
+                f"<div class='stlab'>{html.escape(label)}</div>"
+                + (f"<div class='stsub'>{html.escape(sub)}</div>" if sub else "") + "</div>")
+
+    stats = ("<div class='statgrid'>"
+             + card("브리핑", str(c["am"] + c["pm"]), f"오전 {c['am']} · 오후 {c['pm']}")
+             + card("제작 브리프", str(c["plans"]), "")
+             + card("완성 스크립트", str(c["scripts"]), "")
+             + card("컴플 체크", str(c["checks"]), "")
+             + "</div>")
+
+    v = c["verdicts"]
+    verdict_html = ""
+    if v:
+        order = ["통과", "주의", "수정 필요"]
+        chips = " ".join(f"{verdict_badge(k)} {v[k]}건" for k in order if k in v)
+        verdict_html = ("<div class='rsec'><h3>이번 주 스크립트 컴플 판정</h3>"
+                        f"<div class='vdist'>{chips}</div></div>")
+
+    focus, _kospi, _comp = get_market()
+    prows = []
+    for item in focus:
+        s = item.get("series") or []
+        if len(s) < 2:
+            continue
+        base = s[max(0, len(s) - 6)]["close"]
+        last = s[-1]["close"]
+        wk = ((last / base - 1) * 100) if base else 0
+        arrow = "▲" if wk > 0 else ("▼" if wk < 0 else "→")
+        col = "up" if wk > 0 else ("down" if wk < 0 else "")
+        prows.append(
+            f"<div class='wprow'><span class='wpname'>{html.escape(item['name'])} "
+            f"<span class='dcode'>{html.escape(item['code'])}</span></span>"
+            f"<span class='wchg {col}'>{arrow} {abs(wk):.2f}% "
+            f"<span class='muted'>({_fmt_num(last)}원)</span></span></div>")
+    focus_html = ("<div class='rsec'><h3>집중 상품 주간 흐름 <span class='muted'>(최근 약 5거래일)</span></h3>"
+                  + ("".join(prows) or "<p class='sub'>시세 데이터를 가져오지 못했습니다.</p>") + "</div>")
+
+    cut = _week_cutoff_iso()
+    briefs = [r for r in list_briefings(40) if r[1] and r[1] >= cut][:6]
+    if briefs:
+        brows = "".join(
+            f"<a class='rrow' href='/b/{bid}'><span>{html.escape(kind_label(kind))} · "
+            f"{html.escape((title or '(제목 없음)')[:48])}</span>"
+            f"<span class='rt'>{html.escape(fmt_time(ts))}</span></a>"
+            for bid, ts, ymd, kind, source, title in briefs)
+        briefs_html = f"<div class='rsec'><h3>이번 주 브리핑</h3>{brows}</div>"
+    else:
+        briefs_html = ""
+
+    srecent = [r for r in list_scripts(40) if r[1] and r[1] >= cut][:6]
+    if srecent:
+        srows = "".join(
+            f"<a class='rrow' href='/script/view/{sid}'><span>🎬 "
+            f"{html.escape((req or '(스크립트)').strip()[:46])}{verdict_badge(vd)}</span>"
+            f"<span class='rt'>{html.escape(fmt_time(ts))}</span></a>"
+            for sid, ts, req, vd in srecent)
+        scripts_html = f"<div class='rsec'><h3>이번 주 스크립트</h3>{srows}</div>"
+    else:
+        scripts_html = ""
+
+    inner = (
+        "<header class='mast'><p class='eyebrow'>Weekly Report</p>"
+        "<h1 class='title'>주간 리포트</h1>"
+        f"<p class='sub'>{html.escape(rng)} · 최근 7일 활동 요약입니다. 고객사 공유용으로 이 링크를 그대로 전달하셔도 됩니다.</p></header>"
+        + stats + verdict_html + focus_html + briefs_html + scripts_html + FOOT)
+    return page("주간 리포트", inner, active="/report")
+
+
 @app.get("/b/{bid}", response_class=HTMLResponse)
 def brief_detail(bid: int):
     row = get_briefing(bid)
@@ -915,9 +1186,9 @@ def plan_form():
     if srecents:
         srows = "".join(
             f"<a class='rrow' href='/script/view/{sid}'>"
-            f"<span>🎬 {html.escape((req or '').strip()[:56] or '(제목 없음)')}</span>"
+            f"<span>🎬 {html.escape((req or '').strip()[:56] or '(제목 없음)')}{verdict_badge(v)}</span>"
             f"<span class='rt'>{html.escape(fmt_time(ts))}</span></a>"
-            for sid, ts, req in srecents)
+            for sid, ts, req, v in srecents)
         srec_html = f"<div class='recent'><h3>최근 만든 스크립트</h3>{srows}</div>"
     disabled = "" if PLAN_FN else "disabled"
     warn = "" if PLAN_FN else "<p class='sub' style='color:var(--am)'>제작 기능이 아직 연결되지 않았습니다.</p>"
@@ -988,18 +1259,20 @@ def _run_job(job_id, fn, q, id_field, save_fn):
             JOBS[job_id] = {"status": "error", "error": str(e)[:200]}
 
 
-def _start_text_job(fn, text_in):
-    # 저장 없이 결과 HTML을 바로 돌려주는 잡 (컴플 체크용)
+def _start_text_job(fn, text_in, sid=None):
+    # 저장 없이 결과 HTML을 바로 돌려주는 잡 (컴플 체크용). sid가 있으면 판정을 스크립트에 기록.
     job_id = uuid.uuid4().hex
     with LOCK:
         JOBS[job_id] = {"status": "pending"}
-    threading.Thread(target=_run_text_job, args=(job_id, fn, text_in), daemon=True).start()
+    threading.Thread(target=_run_text_job, args=(job_id, fn, text_in, sid), daemon=True).start()
     return JSONResponse({"job_id": job_id})
 
 
-def _run_text_job(job_id, fn, text_in):
+def _run_text_job(job_id, fn, text_in, sid=None):
     try:
         text = fn(text_in)
+        if sid:
+            save_check_verdict(sid, _extract_verdict(text))
         with LOCK:
             JOBS[job_id] = {"status": "done", "html": render_check(text)}
     except Exception as e:
@@ -1026,7 +1299,7 @@ async def check_run(req: Request):
         text_in = (data.get("request") or "").strip()
     if not text_in:
         return JSONResponse({"error": "점검할 내용이 없습니다."}, status_code=400)
-    return _start_text_job(CHECK_FN, text_in)
+    return _start_text_job(CHECK_FN, text_in, sid=(int(sid) if sid else None))
 
 
 @app.get("/job/{job_id}")
@@ -1053,9 +1326,9 @@ def plan_view(pid: int):
     if made:
         mrows = "".join(
             f"<a class='rrow' href='/script/view/{sid}'>"
-            f"<span>🎬 {html.escape((sreq or '').strip()[:56] or '(스크립트)')}</span>"
+            f"<span>🎬 {html.escape((sreq or '').strip()[:56] or '(스크립트)')}{verdict_badge(v)}</span>"
             f"<span class='rt'>{html.escape(fmt_time(sts))}</span></a>"
-            for sid, sts, sreq in made)
+            for sid, sts, sreq, v in made)
         made_html = f"<div class='recent'><h3>이 브리프로 만든 스크립트</h3>{mrows}</div>"
     script_block = (
         "<section class='brief-sec'>"
@@ -1080,7 +1353,7 @@ def script_view(sid: int):
         return page("스크립트를 찾을 수 없음",
                     "<a class='back' href='/plan'>← 제작 브리프로</a>"
                     "<div class='empty'>해당 스크립트를 찾을 수 없습니다.</div>", active="/plan")
-    _id, ts, request, body, plan_id = row
+    _id, ts, request, body, plan_id, verdict = row
     if plan_id:
         back = f"<a class='back' href='/plan/view/{plan_id}'>← 이 스크립트의 브리프로</a>"
     else:
@@ -1098,7 +1371,7 @@ def script_view(sid: int):
             "<div class='checkresult'></div>"
             "</div></section>")
     inner = (back +
-             "<h1 class='dtitle' style='margin-top:14px'>완성 스크립트</h1>"
+             f"<h1 class='dtitle' style='margin-top:14px'>완성 스크립트{verdict_badge(verdict)}</h1>"
              f"<div class='dmeta'>입력: {html.escape((request or '').strip()[:120])} · {html.escape(fmt_time(ts))}</div>"
              + render_script(body) + check_block + FOOT)
     return page("완성 스크립트", inner, active="/plan", extra_head=f"<script>{CHECK_JS}</script>")
