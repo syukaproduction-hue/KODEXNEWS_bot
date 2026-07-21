@@ -23,6 +23,7 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 DB_PATH = None
 PLAN_FN = None
 SCRIPT_FN = None
+CHECK_FN = None
 BOT_LINK = "https://t.me/kodex_economy"
 MAKER = "주식회사 슈카친구들"
 KST = timezone(timedelta(hours=9))
@@ -32,11 +33,12 @@ JOBS = {}
 LOCK = threading.Lock()
 
 
-def configure(db_path, plan_fn=None, script_fn=None):
-    global DB_PATH, PLAN_FN, SCRIPT_FN
+def configure(db_path, plan_fn=None, script_fn=None, check_fn=None):
+    global DB_PATH, PLAN_FN, SCRIPT_FN, CHECK_FN
     DB_PATH = str(db_path)
     PLAN_FN = plan_fn
     SCRIPT_FN = script_fn
+    CHECK_FN = check_fn
 
 
 # ================= DB =================
@@ -514,6 +516,40 @@ def _script_body(header, lines, disc):
     return "".join(out)
 
 
+def render_check(text):
+    lines = [l.rstrip() for l in (text or "").split("\n")]
+    verdict, body = "", []
+    for l in lines:
+        s = l.strip()
+        if not verdict and s.startswith("판정"):
+            verdict = (s.split(":", 1)[1].strip() if ":" in s else s.replace("판정", "").strip())
+            continue
+        body.append(l)
+    cls = "ok" if "통과" in verdict else ("warn" if "주의" in verdict else ("bad" if verdict else ""))
+    badge = f"<div class='verdict {cls}'>판정 · {html.escape(verdict or '—')}</div>" if verdict else ""
+    parts, ul = [], []
+
+    def flush():
+        if ul:
+            parts.append("<ul class='clist'>" + "".join(f"<li>{x}</li>" for x in ul) + "</ul>")
+            ul.clear()
+
+    for l in body:
+        s = l.strip()
+        if not s:
+            continue
+        if s.startswith(("🚩", "⚠", "✅")):
+            flush()
+            parts.append(f"<div class='chead'>{html.escape(s)}</div>")
+        elif s.startswith(("·", "-", "•")):
+            ul.append(html.escape(s.lstrip("·-• ").strip()))
+        else:
+            flush()
+            parts.append(f"<p class='cp'>{html.escape(s)}</p>")
+    flush()
+    return f"<div class='checkbox'>{badge}{''.join(parts)}</div>"
+
+
 # ================= HTML 뼈대 =================
 CSS = """
 :root{
@@ -571,6 +607,15 @@ ul.blist{margin:6px 0 0;padding-left:18px} ul.blist li{margin:4px 0;font-size:14
 .field{margin-top:8px}
 textarea.inp{width:100%;min-height:96px;resize:vertical;padding:13px 14px;font-size:15px;font-family:var(--sans);border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink)}
 textarea.inp:focus{outline:none;border-color:var(--accent)}
+textarea.inp-tall{min-height:160px}
+.checkwrap{margin-top:14px}
+.checkresult{margin-top:8px}
+.checkbox{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 16px 8px}
+.verdict{display:inline-block;font-weight:800;font-size:14px;padding:6px 14px;border-radius:999px;margin-bottom:10px;color:var(--muted);background:var(--bg)}
+.verdict.ok{color:#0F7A3D;background:#E5F5EC} .verdict.warn{color:var(--am);background:var(--am-bg)} .verdict.bad{color:#D31A2B;background:#FBE7E9}
+.chead{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--ink);margin:12px 0 6px}
+.checkbox .cp{margin:6px 0;font-size:14px;color:#28303a;overflow-wrap:anywhere}
+ul.clist{margin:4px 0 8px;padding-left:18px} ul.clist li{margin:5px 0;font-size:14px;overflow-wrap:anywhere}
 button.go{margin-top:10px;background:var(--accent);color:#fff;border:0;border-radius:10px;font-size:15px;font-weight:600;padding:12px 20px;cursor:pointer}
 button.go:disabled{opacity:.55;cursor:default}
 .statusline{margin-top:14px;font-size:14px;color:var(--muted);display:flex;align-items:center;gap:10px;min-height:22px}
@@ -621,7 +666,7 @@ FONT = ('<link rel="stylesheet" '
 
 def _nav(active):
     items = [("/", "홈"), ("/bot", "텔레그램 봇"), ("/archive", "아카이브"),
-             ("/plan", "제작 브리프"), ("/data", "데이터")]
+             ("/plan", "제작 브리프"), ("/check", "컴플 체크"), ("/data", "데이터")]
     links = "".join(
         f"<a href='{href}' class='{'on' if active == href else ''}'>{html.escape(label)}</a>"
         for href, label in items)
@@ -698,6 +743,45 @@ document.addEventListener('DOMContentLoaded', function(){
 """
 
 
+CHECK_JS = """
+document.addEventListener('DOMContentLoaded', function(){
+  document.addEventListener('click', function(e){
+    var b = e.target.closest ? e.target.closest('.checkbtn') : null;
+    if(!b) return;
+    var wrap = b.parentNode;
+    var st = wrap.querySelector('.checkstatus');
+    var res = wrap.querySelector('.checkresult');
+    var payload;
+    var sid = b.getAttribute('data-sid');
+    if(sid){ payload = {script_id: sid}; }
+    else {
+      var text = b.getAttribute('data-text');
+      if(text===null){
+        var inp = document.getElementById(b.getAttribute('data-input'));
+        text = inp ? (inp.value||'').trim() : '';
+      }
+      if(!text){ if(st) st.textContent='점검할 내용을 입력해 주세요.'; return; }
+      payload = {request: text};
+    }
+    b.disabled=true; if(res) res.innerHTML='';
+    if(st) st.innerHTML="<span class='spin'></span><span>컴플 체크 중… 10~30초. 이 화면을 닫지 마세요.</span>";
+    fetch('/check/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+      .then(function(r){return r.json();})
+      .then(function(j){ if(!j.job_id){throw new Error(j.error||'요청 실패');} poll(j.job_id, b, st, res); })
+      .catch(function(err){ b.disabled=false; if(st) st.textContent='오류: '+err.message; });
+  });
+  function poll(id, b, st, res){
+    var t=setInterval(function(){
+      fetch('/job/'+id).then(function(r){return r.json();}).then(function(j){
+        if(j.status==='done'){ clearInterval(t); b.disabled=false; if(st) st.textContent=''; if(res) res.innerHTML=j.html||''; }
+        else if(j.status==='error'){ clearInterval(t); b.disabled=false; if(st) st.textContent='점검 중 오류: '+(j.error||'알 수 없음'); }
+      }).catch(function(){});
+    }, 2500);
+  }
+});
+"""
+
+
 # ================= 라우트 =================
 @app.get("/robots.txt", response_class=PlainTextResponse)
 def robots():
@@ -718,6 +802,8 @@ def home():
         "<h3>브리핑 아카이브</h3><p>매일 오전·오후 시황 브리핑을 날짜별로 모아 봅니다.</p></a>"
         "<a class='tile' href='/plan'><div class='tic'>🎬</div>"
         "<h3>제작 브리프</h3><p>밀고 싶은 상품·이슈를 넣으면 스토리 앵글·컴플·톤을 기획하고, 완성 스크립트까지 만듭니다.</p></a>"
+        "<a class='tile' href='/check'><div class='tic'>🛡️</div>"
+        "<h3>컴플 셀프체크</h3><p>대본·캡션을 넣으면 단정적 투자권유·수익 보장·미확인 인과 단정 등 위험 표현을 점검합니다.</p></a>"
         "<a class='tile' href='/data'><div class='tic'>📊</div>"
         "<h3>시황 데이터</h3><p>집중 상품의 최근 흐름을 공개 데이터 기반 그래프로 봅니다.</p></a>"
         "</div>" + FOOT)
@@ -731,6 +817,7 @@ def bot_guide():
         ("/pm", "지금 오후형 브리핑(오늘 코스피 마감·장중 이벤트)을 받습니다."),
         ("/plan [상품/이슈]", "숏폼 제작 브리프를 만듭니다. 이 웹의 '제작 브리프'에서도 할 수 있습니다."),
         ("/script [이슈 + 상품]", "완성 숏폼 스크립트를 만듭니다. 이 웹에서도 만들 수 있습니다."),
+        ("/check [대본·캡션]", "붙여넣은 문구의 컴플라이언스 위험 표현을 점검합니다. 이 웹의 '컴플 체크'에서도 할 수 있습니다."),
     ]
     cmd_html = "".join(
         f"<div class='cmd'><code>{html.escape(c)}</code><p>{html.escape(d)}</p></div>" for c, d in cmds)
@@ -771,6 +858,27 @@ def archive():
                 f"<p class='ctitle'>{html.escape(title or '(제목 없음)')}</p></a>")
     parts.append(FOOT)
     return page("브리핑 아카이브", "".join(parts), active="/archive")
+
+
+@app.get("/check", response_class=HTMLResponse)
+def check_form():
+    disabled = "" if CHECK_FN else "disabled"
+    warn = "" if CHECK_FN else "<p class='sub' style='color:var(--am)'>컴플 체크 기능이 아직 연결되지 않았습니다.</p>"
+    inner = (
+        "<header class='mast'><p class='eyebrow'>Compliance Check</p>"
+        "<h1 class='title'>컴플라이언스 셀프체크</h1>"
+        "<p class='sub'>대본·캡션·문구를 넣으면 단정적 투자권유·수익 보장·미확인 인과 단정·"
+        "수수료/위험등급/심사필 누락 같은 위험 표현을 짚어 드립니다. "
+        "사전 점검용이며, 최종 판단은 삼성자산운용 준법 검수로 확정됩니다.</p></header>"
+        + warn +
+        "<div class='field'>"
+        "<textarea id='creq' class='inp inp-tall' placeholder='점검할 대본이나 문구를 붙여넣으세요.'></textarea>"
+        "<div class='checkwrap'>"
+        f"<button class='go checkbtn' data-input='creq' {disabled}>컴플 체크 실행</button>"
+        "<div class='checkstatus statusline'></div>"
+        "<div class='checkresult'></div>"
+        "</div></div>" + FOOT)
+    return page("컴플라이언스 셀프체크", inner, active="/check", extra_head=f"<script>{CHECK_JS}</script>")
 
 
 @app.get("/b/{bid}", response_class=HTMLResponse)
@@ -880,6 +988,47 @@ def _run_job(job_id, fn, q, id_field, save_fn):
             JOBS[job_id] = {"status": "error", "error": str(e)[:200]}
 
 
+def _start_text_job(fn, text_in):
+    # 저장 없이 결과 HTML을 바로 돌려주는 잡 (컴플 체크용)
+    job_id = uuid.uuid4().hex
+    with LOCK:
+        JOBS[job_id] = {"status": "pending"}
+    threading.Thread(target=_run_text_job, args=(job_id, fn, text_in), daemon=True).start()
+    return JSONResponse({"job_id": job_id})
+
+
+def _run_text_job(job_id, fn, text_in):
+    try:
+        text = fn(text_in)
+        with LOCK:
+            JOBS[job_id] = {"status": "done", "html": render_check(text)}
+    except Exception as e:
+        with LOCK:
+            JOBS[job_id] = {"status": "error", "error": str(e)[:200]}
+
+
+@app.post("/check/run")
+async def check_run(req: Request):
+    try:
+        data = await req.json()
+    except Exception:
+        return JSONResponse({"error": "잘못된 요청입니다."}, status_code=400)
+    if CHECK_FN is None:
+        return JSONResponse({"error": "컴플 체크 기능이 연결되지 않았습니다."}, status_code=503)
+    sid = data.get("script_id")
+    if sid:
+        try:
+            row = get_script(int(sid))
+        except Exception:
+            row = None
+        text_in = row[3] if row else ""
+    else:
+        text_in = (data.get("request") or "").strip()
+    if not text_in:
+        return JSONResponse({"error": "점검할 내용이 없습니다."}, status_code=400)
+    return _start_text_job(CHECK_FN, text_in)
+
+
 @app.get("/job/{job_id}")
 def job_status(job_id: str):
     with LOCK:
@@ -936,11 +1085,23 @@ def script_view(sid: int):
         back = f"<a class='back' href='/plan/view/{plan_id}'>← 이 스크립트의 브리프로</a>"
     else:
         back = "<a class='back' href='/plan'>← 제작 브리프로</a>"
+    check_block = ""
+    if CHECK_FN:
+        check_block = (
+            "<section class='brief-sec'>"
+            "<h2 class='sec-h'><span class='sec-ic'>🛡️</span>컴플라이언스 셀프체크</h2>"
+            "<p class='sec-p'>이 대본에 단정적 투자권유·수익 보장·미확인 인과 단정 등 위험 표현이 없는지 점검합니다. "
+            "최종 판단은 삼성자산운용 준법 검수로 확정됩니다.</p>"
+            "<div class='checkwrap'>"
+            f"<button class='go checkbtn' data-sid='{sid}'>이 대본 컴플 체크</button>"
+            "<div class='checkstatus statusline'></div>"
+            "<div class='checkresult'></div>"
+            "</div></section>")
     inner = (back +
              "<h1 class='dtitle' style='margin-top:14px'>완성 스크립트</h1>"
              f"<div class='dmeta'>입력: {html.escape((request or '').strip()[:120])} · {html.escape(fmt_time(ts))}</div>"
-             + render_script(body) + FOOT)
-    return page("완성 스크립트", inner, active="/plan")
+             + render_script(body) + check_block + FOOT)
+    return page("완성 스크립트", inner, active="/plan", extra_head=f"<script>{CHECK_JS}</script>")
 
 
 @app.get("/data", response_class=HTMLResponse)
