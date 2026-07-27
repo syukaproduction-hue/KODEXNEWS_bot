@@ -45,6 +45,8 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 # 운영자(마케터) 본인 ID. /stats 권한용. Railway Variables에 ADMIN_CHAT_ID로 넣으면 됨.
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "").strip()
+# 공개 웹 도구 링크 안내용. Railway에 WEB_BASE_URL 넣으면 그 값 사용.
+WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "https://kodexnewsbot-production.up.railway.app").rstrip("/")
 # 자동 브리핑을 발송할 채널 ID. Railway Variables에 TARGET_CHANNEL_ID로 넣음 (-100... 형태).
 TARGET_CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID", "").strip()
 
@@ -670,6 +672,28 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"컴플 체크 중 오류가 발생했습니다: {e}")
 
 
+async def cmd_tools(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "대중용 공개 도구는 '웹 페이지'입니다(봇 명령이 아니라 링크로 열려요).\n\n"
+        f"• 모아보기: {WEB_BASE_URL}/tools\n"
+        f"• 월 배당 계산기: {WEB_BASE_URL}/dividend\n"
+        f"• 3분 투자 상식: {WEB_BASE_URL}/learn\n"
+        f"• 투자 설문: {WEB_BASE_URL}/survey\n\n"
+        "이 링크들은 비밀번호 없이 열리니 그대로 공유하시면 됩니다.")
+
+
+async def cmd_dividend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"월 배당 계산기(웹): {WEB_BASE_URL}/dividend")
+
+
+async def cmd_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"3분 투자 상식(웹): {WEB_BASE_URL}/learn")
+
+
+async def cmd_survey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"투자 설문(웹): {WEB_BASE_URL}/survey")
+
+
 async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     req = " ".join(context.args).strip()
     if not req:
@@ -821,6 +845,10 @@ def main():
     app.add_handler(CommandHandler("script", cmd_script))
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CommandHandler("caption", cmd_caption))
+    app.add_handler(CommandHandler("tools", cmd_tools))
+    app.add_handler(CommandHandler("dividend", cmd_dividend))
+    app.add_handler(CommandHandler("learn", cmd_learn))
+    app.add_handler(CommandHandler("survey", cmd_survey))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
