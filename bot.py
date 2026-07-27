@@ -55,6 +55,7 @@ PROMPT_PM = BASE / "briefing_pm_prompt.md"
 SCRIPT_PROMPT = BASE / "script_prompt.md"
 BRIEF_PROMPT = BASE / "brief_prompt.md"
 CHECK_PROMPT = BASE / "check_prompt.md"
+CAPTION_PROMPT = BASE / "caption_prompt.md"
 
 # DB 위치: Railway 볼륨을 /data 에 연결하면 영구 보존됨. 없으면 로컬 파일로 동작.
 DB_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -83,8 +84,9 @@ def db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS scripts(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT, plan_id INTEGER,
-        check_verdict TEXT, check_at TEXT)""")
-    for col, typ in (("plan_id", "INTEGER"), ("check_verdict", "TEXT"), ("check_at", "TEXT")):
+        check_verdict TEXT, check_at TEXT, check_body TEXT, check_tags TEXT)""")
+    for col, typ in (("plan_id", "INTEGER"), ("check_verdict", "TEXT"), ("check_at", "TEXT"),
+                     ("check_body", "TEXT"), ("check_tags", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE scripts ADD COLUMN {col} {typ}")  # 기존 테이블 대비
         except Exception:
@@ -486,6 +488,18 @@ def web_generate_check(text_in: str):
     return text
 
 
+def generate_caption_sync(text_in: str):
+    system_text = CAPTION_PROMPT.read_text(encoding="utf-8") + "\n\n" + build_products_block()
+    return _call(system_text, f"다음 대본/주제로 업로드용 캡션과 해시태그를 만들어줘:\n\n{text_in}", use_search=False)
+
+
+def web_generate_caption(text_in: str):
+    # 웹 '캡션·해시태그 생성'에서 호출.
+    text, itok, otok = generate_caption_sync(text_in)
+    log_usage("WEB", "caption", itok, otok)
+    return text
+
+
 # ===================== 발송 =====================
 async def send_long(bot, chat_id, text: str):
     if len(text) <= TG_LIMIT:
@@ -512,6 +526,7 @@ WELCOME = (
     "· /plan KODEX AI전력핵심설비  (제작 브리프: 스토리·컴플·톤 기획)\n"
     "· /script 마이크론 시총 1조 돌파, 미국AI반도체TOP3플러스로  (숏폼 스크립트 작성)\n"
     "· /check [대본·캡션 붙여넣기]  (컴플라이언스 셀프체크 — 위험 표현 점검)\n"
+    "· /caption [대본·주제]  (업로드용 캡션·해시태그 생성)\n"
     "· /brief  (지금 오전형 브리핑 받기)\n"
     "· /pm  (지금 오후형 장중 브리핑 받기)\n"
 )
@@ -655,6 +670,24 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"컴플 체크 중 오류가 발생했습니다: {e}")
 
 
+async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    req = " ".join(context.args).strip()
+    if not req:
+        await update.message.reply_text(
+            "사용법: /caption 다음에 대본이나 주제를 넣으세요.\n"
+            "업로드용 캡션과 해시태그를 만들어 드립니다.\n"
+            "예) /caption 삼성전자 실적 발표, AI반도체TOP2플러스")
+        return
+    await update.message.reply_text("캡션·해시태그를 만드는 중입니다… (10~30초)")
+    try:
+        text, itok, otok = await asyncio.to_thread(generate_caption_sync, req)
+        log_usage(update.effective_chat.id, "caption", itok, otok)
+        await send_long(context.bot, update.effective_chat.id, text)
+    except Exception as e:
+        log.exception("caption failed")
+        await update.message.reply_text(f"캡션 생성 중 오류가 발생했습니다: {e}")
+
+
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     req = " ".join(context.args).strip()
     if not req:
@@ -761,7 +794,8 @@ def start_web():
     try:
         import uvicorn
         import web
-        web.configure(DB_PATH, web_generate_plan, web_generate_script, web_generate_check)
+        web.configure(DB_PATH, web_generate_plan, web_generate_script,
+                      web_generate_check, web_generate_caption)
         web.start_refresher()
         port = int(os.environ.get("PORT", "8080"))
         config = uvicorn.Config(web.app, host="0.0.0.0", port=port, log_level="warning")
@@ -786,6 +820,7 @@ def main():
     app.add_handler(CommandHandler("pm", cmd_pm))
     app.add_handler(CommandHandler("script", cmd_script))
     app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("caption", cmd_caption))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
