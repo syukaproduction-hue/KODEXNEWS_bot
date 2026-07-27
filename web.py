@@ -31,6 +31,7 @@ DB_PATH = None
 PLAN_FN = None
 SCRIPT_FN = None
 CHECK_FN = None
+CAPTION_FN = None
 BOT_LINK = "https://t.me/kodex_economy"
 MAKER = "주식회사 슈카친구들"
 KST = timezone(timedelta(hours=9))
@@ -40,7 +41,8 @@ WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "KODEX")
 AUTH_TOKEN = hashlib.sha256(("kdx:" + WEB_PASSWORD).encode()).hexdigest()
 AUTH_COOKIE = "kdx_auth"
-GATE_EXEMPT = {"/login", "/login/auth", "/robots.txt", "/logo.svg"}
+GATE_EXEMPT = {"/login", "/login/auth", "/robots.txt", "/logo.svg",
+               "/dividend", "/learn", "/survey", "/survey/vote"}
 
 _BASE = Path(__file__).parent
 LOGO_PATH = _BASE / "logo_kodex_ko.svg"
@@ -50,12 +52,13 @@ JOBS = {}
 LOCK = threading.Lock()
 
 
-def configure(db_path, plan_fn=None, script_fn=None, check_fn=None):
-    global DB_PATH, PLAN_FN, SCRIPT_FN, CHECK_FN
+def configure(db_path, plan_fn=None, script_fn=None, check_fn=None, caption_fn=None):
+    global DB_PATH, PLAN_FN, SCRIPT_FN, CHECK_FN, CAPTION_FN
     DB_PATH = str(db_path)
     PLAN_FN = plan_fn
     SCRIPT_FN = script_fn
     CHECK_FN = check_fn
+    CAPTION_FN = caption_fn
 
 
 # ================= DB =================
@@ -68,14 +71,17 @@ def _con():
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS scripts(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, request TEXT, body TEXT, plan_id INTEGER,
-        check_verdict TEXT, check_at TEXT)""")
-    for col, typ in (("plan_id", "INTEGER"), ("check_verdict", "TEXT"), ("check_at", "TEXT")):
+        check_verdict TEXT, check_at TEXT, check_body TEXT, check_tags TEXT)""")
+    for col, typ in (("plan_id", "INTEGER"), ("check_verdict", "TEXT"), ("check_at", "TEXT"),
+                     ("check_body", "TEXT"), ("check_tags", "TEXT")):
         try:
             con.execute(f"ALTER TABLE scripts ADD COLUMN {col} {typ}")  # 기존 테이블 대비
         except Exception:
             pass
     con.execute("""CREATE TABLE IF NOT EXISTS product_news(
         code TEXT PRIMARY KEY, title TEXT, url TEXT, comp_name TEXT, comp_code TEXT, updated_at TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS survey_votes(
+        qid TEXT, choice TEXT, ts TEXT)""")
     for col in ("comp_name", "comp_code"):
         try:
             con.execute(f"ALTER TABLE product_news ADD COLUMN {col} TEXT")  # 기존 테이블 대비
@@ -116,7 +122,8 @@ def get_plan(pid):
 
 
 def get_script(sid):
-    r = _rows("SELECT id, ts, request, body, plan_id, check_verdict FROM scripts WHERE id=?", (sid,))
+    r = _rows("SELECT id, ts, request, body, plan_id, check_verdict, check_body, check_tags "
+              "FROM scripts WHERE id=?", (sid,))
     return r[0] if r else None
 
 
@@ -165,18 +172,52 @@ def _extract_verdict(text):
     return ""
 
 
-def save_check_verdict(sid, verdict):
-    if not sid or not verdict:
+# 컴플라이언스에서 자주 문제되는 표현 유형 (최성락 팀장: 통과 사례를 유형별로 찾게)
+COMP_TAGS = [
+    ("수익률", ["수익률", "누적수익", "연평균"]),
+    ("배당·월배당", ["배당", "월 배당", "월배당"]),
+    ("분배율", ["분배", "분배율", "분배금"]),
+    ("커버드콜", ["커버드콜", "커버드 콜"]),
+    ("기준일", ["기준일", "상장 이후", "상장이후"]),
+    ("원금·손실", ["원금", "손실"]),
+    ("세금", ["세금", "세전", "세후", "비과세"]),
+]
+
+
+def _detect_tags(text):
+    t = text or ""
+    found = [name for name, kws in COMP_TAGS if any(k in t for k in kws)]
+    return ",".join(found)
+
+
+def save_check_result(sid, verdict, body, tags):
+    if not sid:
         return
     con = _con()
     try:
-        con.execute("UPDATE scripts SET check_verdict=?, check_at=? WHERE id=?",
-                    (verdict, datetime.now(KST).isoformat(), int(sid)))
+        con.execute(
+            "UPDATE scripts SET check_verdict=?, check_at=?, check_body=?, check_tags=? WHERE id=?",
+            (verdict, datetime.now(KST).isoformat(), body, tags, int(sid)))
         con.commit()
     except Exception:
         pass
     finally:
         con.close()
+
+
+def list_checked(verdict="all", tag="all", limit=100):
+    sql = ("SELECT id, ts, request, check_verdict, check_tags FROM scripts "
+           "WHERE check_verdict IS NOT NULL AND check_verdict<>''")
+    args = []
+    if verdict in ("통과", "주의", "수정 필요"):
+        sql += " AND check_verdict=?"
+        args.append(verdict)
+    if tag and tag != "all":
+        sql += " AND check_tags LIKE ?"
+        args.append(f"%{tag}%")
+    sql += " ORDER BY check_at DESC LIMIT ?"
+    args.append(limit)
+    return _rows(sql, tuple(args))
 
 
 def _save_plan(request, body):
@@ -388,7 +429,7 @@ def _news_mood_request(name, code, news):
             f"소재 기사: {title}" + (f" ({url})" if url else ""))
 
 
-def _data_card(name, code, series, gid, competitor=None, news=None, news_slot=True):
+def _data_card(name, code, series, gid, competitor=None, news=None, news_slot=True, detail_url=None):
     comp_ok = competitor and len(competitor.get("series") or []) >= 2
     comp_note = ""
     if comp_ok:
@@ -423,7 +464,9 @@ def _data_card(name, code, series, gid, competitor=None, news=None, news_slot=Tr
             newsblock = ("<div class='newsbox nb-empty'>오늘의 시황 숏폼 소재가 아직 없습니다. "
                          "평일 오전 9시 브리핑이 나오면 자동으로 채워집니다. "
                          "(텔레그램 봇 <code>/news</code> 명령으로 직접 등록·수정도 가능)</div>")
-    return f"<div class='dcard'>{body}{comp_note}{newsblock}</div>"
+    detail = (f"<a class='detaillink' href='{detail_url}'>이 상품 상세·관련 콘텐츠 →</a>"
+              if detail_url else "")
+    return f"<div class='dcard'>{body}{comp_note}{newsblock}{detail}</div>"
 
 
 # ================= 제작 브리프 텍스트 -> HTML =================
@@ -627,6 +670,22 @@ def verdict_badge(v):
     return f"<span class='vbadge {cls}'>{html.escape(v)}</span>"
 
 
+def _tag_chips(tags):
+    items = [t for t in (tags or "").split(",") if t]
+    if not items:
+        return ""
+    chips = "".join(f"<span class='ctag'>{html.escape(t)}</span>" for t in items)
+    return f"<div class='ctags'>{chips}</div>"
+
+
+def render_caption(text):
+    t = (text or "").strip()
+    return ("<div class='capbox'>"
+            f"<pre class='captext'>{html.escape(t)}</pre>"
+            f"<div class='caprow'><button class='go copybtn' data-copy=\"{html.escape(t, quote=True)}\">캡션 복사</button>"
+            "<span class='copymsg'></span></div></div>")
+
+
 # ================= HTML 뼈대 =================
 CSS = """
 :root{
@@ -708,6 +767,33 @@ ul.clist{margin:4px 0 8px;padding-left:18px} ul.clist li{margin:5px 0;font-size:
 .wchg{font-family:var(--mono);font-size:13px;font-weight:700;white-space:nowrap}
 .wchg.up{color:#D31A2B} .wchg.down{color:#0B4EA2}
 .wchg .muted{color:var(--muted);font-weight:400}
+.capwrap{margin-top:14px}
+.capbox{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-top:8px}
+pre.captext{white-space:pre-wrap;word-break:break-word;font-family:var(--sans);font-size:14.5px;line-height:1.6;color:var(--ink);margin:0 0 12px}
+.caprow{display:flex;align-items:center;gap:8px}
+.copybtn{font-size:13px;padding:8px 14px}
+.copymsg{font-size:12px;color:#0F7A3D}
+.searchbar{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 18px}
+.searchbar input[type=text]{flex:1 1 200px;min-width:0;padding:11px 13px;font-size:15px;border:1px solid var(--line);border-radius:11px;background:var(--surface);color:var(--ink)}
+.searchbar input[type=text]:focus{outline:none;border-color:var(--accent)}
+.searchbar select{padding:11px 12px;font-size:14px;border:1px solid var(--line);border-radius:11px;background:var(--surface);color:var(--ink)}
+.searchbar .go{padding:11px 18px}
+.reslabel{font-size:13px;color:var(--muted);margin-bottom:10px}
+.arow{align-items:center;gap:10px}
+.tchip{flex:0 0 auto;font-family:var(--mono);font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:999px;white-space:nowrap}
+.tchip.am{color:var(--am);background:var(--am-bg)} .tchip.pm{color:var(--accent);background:var(--pm-bg)}
+.tchip.brief{color:#7A3DBF;background:#F1E9FB} .tchip.script{color:#0F7A3D;background:#E5F5EC}
+.atitle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:600}
+.detaillink{display:inline-block;margin-top:12px;font-size:13px;font-weight:600;color:var(--accent);text-decoration:none}
+.detaillink:hover{text-decoration:underline}
+.ctags{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.ctag{font-family:var(--mono);font-size:11px;font-weight:700;color:#5B6472;background:#EEF1F4;padding:3px 9px;border-radius:999px}
+.rowtags{margin:-4px 0 10px 2px}
+.savedcheck{font-family:var(--mono);font-size:11px;color:var(--muted);margin:4px 0 6px}
+.filterline{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0}
+.flab{font-size:12px;color:var(--muted);margin-right:4px;min-width:52px}
+.fchip{font-size:12.5px;font-weight:600;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 12px;text-decoration:none}
+.fchip.on{background:var(--accent);color:#fff;border-color:transparent}
 button.go{margin-top:10px;background:var(--accent);color:#fff;border:0;border-radius:10px;font-size:15px;font-weight:600;padding:12px 20px;cursor:pointer}
 button.go:disabled{opacity:.55;cursor:default}
 .statusline{margin-top:14px;font-size:14px;color:var(--muted);display:flex;align-items:center;gap:10px;min-height:22px}
@@ -887,6 +973,50 @@ document.addEventListener('DOMContentLoaded', function(){
 """
 
 
+CAPTION_JS = """
+document.addEventListener('DOMContentLoaded', function(){
+  document.addEventListener('click', function(e){
+    var cp = e.target.closest ? e.target.closest('.copybtn') : null;
+    if(cp){
+      var txt = cp.getAttribute('data-copy')||'';
+      if(navigator.clipboard){ navigator.clipboard.writeText(txt).then(function(){
+        var m=cp.parentNode.querySelector('.copymsg'); if(m){m.textContent=' 복사됐어요';}
+      }); }
+      return;
+    }
+    var b = e.target.closest ? e.target.closest('.capbtn') : null;
+    if(!b) return;
+    var wrap = b.parentNode;
+    var st = wrap.querySelector('.capstatus');
+    var res = wrap.querySelector('.capresult');
+    var payload;
+    var sid = b.getAttribute('data-sid');
+    if(sid){ payload = {script_id: sid}; }
+    else {
+      var inp = document.getElementById(b.getAttribute('data-input'));
+      var text = inp ? (inp.value||'').trim() : '';
+      if(!text){ if(st) st.textContent='내용을 입력해 주세요.'; return; }
+      payload = {request: text};
+    }
+    b.disabled=true; if(res) res.innerHTML='';
+    if(st) st.innerHTML="<span class='spin'></span><span>캡션·해시태그 생성 중… 10~30초.</span>";
+    fetch('/caption/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+      .then(function(r){return r.json();})
+      .then(function(j){ if(!j.job_id){throw new Error(j.error||'요청 실패');} poll(j.job_id, b, st, res); })
+      .catch(function(err){ b.disabled=false; if(st) st.textContent='오류: '+err.message; });
+  });
+  function poll(id, b, st, res){
+    var t=setInterval(function(){
+      fetch('/job/'+id).then(function(r){return r.json();}).then(function(j){
+        if(j.status==='done'){ clearInterval(t); b.disabled=false; if(st) st.textContent=''; if(res) res.innerHTML=j.html||''; }
+        else if(j.status==='error'){ clearInterval(t); b.disabled=false; if(st) st.textContent='생성 중 오류: '+(j.error||'알 수 없음'); }
+      }).catch(function(){});
+    }, 2500);
+  }
+});
+"""
+
+
 # ================= 라우트 =================
 @app.get("/robots.txt", response_class=PlainTextResponse)
 def robots():
@@ -980,6 +1110,341 @@ def logout():
     return resp
 
 
+# ---------- 대중용 공개 도구: 월 배당 계산기 (비밀번호 없음, 브랜드·상품명 없음) ----------
+DIVIDEND_CSS = """
+*{box-sizing:border-box} :root{--bg:#0E1730;--card:#17213C;--line:#2A375A;--ink:#EAF0FF;--sub:#9FB0D6;--accent:#4C8DFF;--accent2:#8AB4FF;--good:#37D39B}
+html,body{margin:0} body{font-family:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;background:radial-gradient(1200px 600px at 50% -10%,#1b2a52 0,#0E1730 60%),#0E1730;color:var(--ink);min-height:100vh}
+.wrap{max-width:520px;margin:0 auto;padding:28px 18px 60px}
+.hero{text-align:center;padding:14px 0 8px}
+.hero h1{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:0 0 8px}
+.hero p{color:var(--sub);font-size:14.5px;line-height:1.6;margin:0}
+.tabs{display:flex;gap:8px;margin:22px 0 16px}
+.tab{flex:1;text-align:center;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--sub);font-weight:700;font-size:14px;cursor:pointer;transition:.15s}
+.tab.on{background:linear-gradient(135deg,var(--accent),#6F7BFF);color:#fff;border-color:transparent}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px}
+.field{margin-bottom:18px}
+.field label{display:block;font-size:13px;color:var(--sub);margin-bottom:8px;font-weight:600}
+.amt{position:relative}
+.amt input{width:100%;padding:14px 42px 14px 14px;font-size:20px;font-weight:800;border:1px solid var(--line);border-radius:12px;background:#0F1830;color:var(--ink);text-align:right}
+.amt input:focus{outline:none;border-color:var(--accent)}
+.amt .unit{position:absolute;right:14px;top:50%;transform:translateY(-50%);color:var(--sub);font-weight:700}
+.quick{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.quick button{flex:1;min-width:60px;padding:8px;border:1px solid var(--line);background:#0F1830;color:var(--accent2);border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer}
+.slider label{display:flex;justify-content:space-between}
+.slider .yv{color:var(--accent2);font-weight:800}
+input[type=range]{width:100%;accent-color:var(--accent);height:26px}
+.rangehint{display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-top:-2px}
+.result{margin-top:8px;text-align:center;background:linear-gradient(135deg,#132a52,#141d38);border:1px solid #315089;border-radius:16px;padding:22px}
+.result .lab{font-size:13px;color:var(--accent2);font-weight:700;margin-bottom:6px}
+.result .big{font-size:34px;font-weight:900;letter-spacing:-.02em;line-height:1.15}
+.result .sub{font-size:13px;color:var(--sub);margin-top:8px;line-height:1.5}
+.share{margin-top:14px;width:100%;padding:13px;border-radius:12px;border:none;background:#22315a;color:var(--ink);font-weight:700;font-size:14px;cursor:pointer}
+.disc{margin-top:20px;font-size:11.5px;color:#8394BC;line-height:1.7;background:#111a33;border:1px solid var(--line);border-radius:12px;padding:14px}
+.disc b{color:#AFC0E6}
+.foot{text-align:center;color:#6B7BA6;font-size:11px;margin-top:22px}
+"""
+
+DIVIDEND_JS = """
+(function(){
+  var mode=1;
+  var $=function(id){return document.getElementById(id);};
+  function won(n){ n=Math.max(0,Math.round(n));
+    if(n>=100000000){var e=Math.floor(n/100000000),m=Math.round((n%100000000)/10000);return e+'억'+(m?' '+m.toLocaleString()+'만':'')+'원';}
+    if(n>=10000){return Math.round(n/10000).toLocaleString()+'만원';}
+    return n.toLocaleString()+'원';}
+  function num(v){return parseFloat((v||'').toString().replace(/[^0-9.]/g,''))||0;}
+  function fmt(el){var v=num(el.value);el.value=v?v.toLocaleString():'';}
+  function calc(){
+    var y=parseFloat($('yield').value); $('yv').textContent=y.toFixed(1)+'%';
+    if(mode===1){
+      var amt=num($('amt').value); var monthly=amt*(y/100)/12;
+      $('rlab').textContent='매달 예상 수령액 (가정)';
+      $('rbig').textContent='월 '+won(monthly);
+      $('rsub').textContent='연 '+won(monthly*12)+' · 연 분배율 '+y+'% 가정 · 세전·비용 미반영';
+    } else {
+      var tgt=num($('tgt').value); var need=(y>0)?(tgt*12/(y/100)):0;
+      $('rlab').textContent='필요한 투자 원금 (가정)';
+      $('rbig').textContent=won(need);
+      $('rsub').textContent='매달 '+won(tgt)+' 받으려면 · 연 분배율 '+y+'% 가정 · 세전·비용 미반영';
+    }
+  }
+  function setMode(m){ mode=m;
+    $('t1').classList.toggle('on',m===1); $('t2').classList.toggle('on',m===2);
+    $('box1').style.display=(m===1)?'block':'none'; $('box2').style.display=(m===2)?'block':'none';
+    calc();
+  }
+  window.addEventListener('DOMContentLoaded',function(){
+    $('t1').addEventListener('click',function(){setMode(1);});
+    $('t2').addEventListener('click',function(){setMode(2);});
+    ['amt','tgt'].forEach(function(id){var el=$(id);el.addEventListener('input',function(){fmt(el);calc();});});
+    $('yield').addEventListener('input',calc);
+    document.querySelectorAll('.quick button').forEach(function(b){
+      b.addEventListener('click',function(){var t=$(b.getAttribute('data-t'));t.value=parseInt(b.getAttribute('data-v')).toLocaleString();calc();});
+    });
+    $('share').addEventListener('click',function(){
+      if(navigator.share){navigator.share({title:'월 배당 계산기',url:location.href});}
+      else if(navigator.clipboard){navigator.clipboard.writeText(location.href);$('share').textContent='링크가 복사됐어요';}
+    });
+    setMode(1);
+  });
+})();
+"""
+
+
+@app.get("/dividend", response_class=HTMLResponse)
+def dividend_tool():
+    body = (
+        "<div class='wrap'>"
+        "<div class='hero'><h1>월 배당 계산기</h1>"
+        "<p>얼마를 넣으면 매달 얼마나 받을까?<br>반대로 매달 원하는 금액을 받으려면 얼마가 필요할까?</p></div>"
+        "<div class='tabs'><div id='t1' class='tab on'>금액 → 월 수령</div>"
+        "<div id='t2' class='tab'>목표 월수령 → 필요 금액</div></div>"
+        "<div class='card'>"
+        # 모드1
+        "<div id='box1'>"
+        "<div class='field'><label>투자 금액</label>"
+        "<div class='amt'><input id='amt' inputmode='numeric' placeholder='0' value='200,000,000'><span class='unit'>원</span></div>"
+        "<div class='quick'>"
+        "<button data-t='amt' data-v='10000000'>1천만</button>"
+        "<button data-t='amt' data-v='50000000'>5천만</button>"
+        "<button data-t='amt' data-v='100000000'>1억</button>"
+        "<button data-t='amt' data-v='300000000'>3억</button></div></div>"
+        "</div>"
+        # 모드2
+        "<div id='box2' style='display:none'>"
+        "<div class='field'><label>목표 월 수령액</label>"
+        "<div class='amt'><input id='tgt' inputmode='numeric' placeholder='0' value='3,000,000'><span class='unit'>원</span></div>"
+        "<div class='quick'>"
+        "<button data-t='tgt' data-v='1000000'>100만</button>"
+        "<button data-t='tgt' data-v='2000000'>200만</button>"
+        "<button data-t='tgt' data-v='3000000'>300만</button>"
+        "<button data-t='tgt' data-v='5000000'>500만</button></div></div>"
+        "</div>"
+        # 분배율 슬라이더
+        "<div class='field slider'><label>연 분배율 가정 <span class='yv' id='yv'>8.0%</span></label>"
+        "<input id='yield' type='range' min='1' max='20' step='0.5' value='8'>"
+        "<div class='rangehint'><span>1%</span><span>20%</span></div></div>"
+        # 결과
+        "<div class='result'><div class='lab' id='rlab'>매달 예상 수령액 (가정)</div>"
+        "<div class='big' id='rbig'>월 0원</div><div class='sub' id='rsub'></div></div>"
+        "<button id='share' class='share'>계산기 공유하기</button>"
+        "</div>"
+        # 컴플 안내
+        "<div class='disc'><b>꼭 확인하세요.</b> 이 계산기는 여러분이 직접 입력한 가정(연 분배율)에 따른 단순 산수 결과입니다. "
+        "특정 금융상품의 수익률이 아니며, 미래의 수익이나 배당을 보장하지 않습니다. "
+        "세금·수수료 등 비용은 반영되어 있지 않습니다. 투자 권유가 아닌 교육용 참고 자료입니다.</div>"
+        "<div class='foot'>교육용 참고 도구 · 실제 투자 결정은 본인의 판단과 책임입니다.</div>"
+        "</div>")
+    return HTMLResponse(
+        "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0E1730'>"
+        f"<title>월 배당 계산기</title>{FONT}<style>{DIVIDEND_CSS}</style>"
+        f"<script>{DIVIDEND_JS}</script></head><body>{body}</body></html>")
+
+
+# ---------- 공개 도구 공용 레이아웃 (지식·설문) ----------
+PUBLIC_CSS = """
+*{box-sizing:border-box} :root{--bg:#0E1730;--card:#17213C;--line:#2A375A;--ink:#EAF0FF;--sub:#9FB0D6;--accent:#4C8DFF;--accent2:#8AB4FF;--good:#37D39B}
+html,body{margin:0} body{font-family:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;background:radial-gradient(1200px 600px at 50% -10%,#1b2a52 0,#0E1730 60%),#0E1730;color:var(--ink);min-height:100vh}
+.wrap{max-width:560px;margin:0 auto;padding:28px 18px 60px}
+.hero{text-align:center;padding:10px 0 6px}
+.hero h1{font-size:25px;font-weight:800;letter-spacing:-.02em;margin:0 0 8px}
+.hero p{color:var(--sub);font-size:14px;line-height:1.6;margin:0}
+.qcard{background:var(--card);border:1px solid var(--line);border-radius:14px;margin:10px 0;overflow:hidden}
+.qcard summary{list-style:none;cursor:pointer;padding:16px 18px;font-weight:700;font-size:15px;display:flex;justify-content:space-between;gap:10px}
+.qcard summary::-webkit-details-marker{display:none}
+.qcard summary .arw{color:var(--accent2);transition:.2s}
+.qcard[open] summary .arw{transform:rotate(90deg)}
+.qcard .ans{padding:0 18px 16px;color:#CBD6F0;font-size:14px;line-height:1.7}
+.cat{font-family:ui-monospace,monospace;font-size:11px;color:var(--accent2);letter-spacing:.05em;margin:22px 0 4px;font-weight:700}
+.sq{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin:12px 0}
+.sq h3{font-size:16px;margin:0 0 14px;font-weight:800}
+.sq .opt{display:block;width:100%;text-align:left;padding:13px 15px;margin:8px 0;border:1px solid var(--line);border-radius:11px;background:#0F1830;color:var(--ink);font-size:14.5px;font-weight:600;cursor:pointer;transition:.12s}
+.sq .opt:hover{border-color:var(--accent)}
+.sq .bar{margin:8px 0;position:relative;background:#0F1830;border-radius:9px;overflow:hidden;height:38px;border:1px solid var(--line)}
+.sq .bar .fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#2C63C7,#4C8DFF);border-radius:9px;transition:width .5s}
+.sq .bar .txt{position:absolute;left:12px;top:0;bottom:0;display:flex;align-items:center;font-size:13.5px;font-weight:700;z-index:1}
+.sq .bar .pct{position:absolute;right:12px;top:0;bottom:0;display:flex;align-items:center;font-size:13px;font-weight:800;color:var(--accent2);z-index:1}
+.sq .voted{font-size:12px;color:var(--good);margin-top:6px}
+.sq .total{font-size:12px;color:var(--sub);margin-top:8px}
+.disc{margin-top:20px;font-size:11.5px;color:#8394BC;line-height:1.7;background:#111a33;border:1px solid var(--line);border-radius:12px;padding:14px}
+.disc b{color:#AFC0E6}
+.foot{text-align:center;color:#6B7BA6;font-size:11px;margin-top:22px}
+.plink{display:inline-block;margin:14px auto 0;color:var(--accent2);font-size:13px;text-decoration:none;font-weight:600}
+"""
+
+
+def public_page(title, body, extra_head=""):
+    return HTMLResponse(
+        "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0E1730'>"
+        f"<title>{html.escape(title)}</title>{FONT}<style>{PUBLIC_CSS}</style>{extra_head}"
+        f"<body>{body}</body></html>")
+
+
+# 대중용 지식 카드 (연금·투자·경제 기초 · 상품/브랜드/ETF 언급 없음, 교육용)
+LEARN_CARDS = [
+    ("연금 계좌 기초", [
+        ("연금저축과 IRP, 뭐가 달라요?",
+         "둘 다 노후를 위해 세제 혜택을 주는 계좌예요. 연금저축은 누구나 만들 수 있고, IRP(개인형 퇴직연금)는 소득이 있는 사람이 퇴직금까지 넣을 수 있어요. 두 계좌를 합쳐 연간 최대 900만 원까지 세액공제를 받을 수 있습니다."),
+        ("ISA는 뭐예요?",
+         "ISA(개인종합자산관리계좌)는 여러 상품을 한 계좌에서 굴리며 이자·수익에 세금 혜택을 받는 계좌예요. 만기 후 연금 계좌로 옮기면 추가 세제 혜택도 있습니다."),
+        ("세액공제가 정확히 뭐예요?",
+         "낸 세금에서 일정 금액을 직접 깎아주는 걸 말해요. 예를 들어 연금저축·IRP에 넣으면 넣은 금액의 일부(소득에 따라 13.2~16.5%)를 연말정산 때 돌려받습니다."),
+    ]),
+    ("투자 기본 개념", [
+        ("복리가 왜 중요해요?",
+         "번 수익에 다시 수익이 붙는 걸 복리라고 해요. 시간이 길수록 눈덩이처럼 커지기 때문에, 일찍 시작할수록 유리하다고 말하는 이유예요."),
+        ("분산투자가 뭐예요?",
+         "한 곳에 몰아넣지 않고 여러 자산·지역·업종에 나눠 담는 걸 말해요. 하나가 흔들려도 전체 충격을 줄이는 효과가 있습니다."),
+        ("인플레이션이 내 돈에 어떤 영향을 줘요?",
+         "물가가 오르면 같은 돈으로 살 수 있는 게 줄어요. 즉 현금을 그냥 두면 실질 가치가 조금씩 깎이는 셈이라, 이를 방어하려 투자하는 사람이 많습니다."),
+    ]),
+    ("요즘 뜨는 궁금증", [
+        ("GPU랑 CPU, 뭐가 달라요?",
+         "CPU는 복잡한 일을 순서대로 빠르게 처리하는 '만능 일꾼', GPU는 단순한 계산을 동시에 엄청 많이 처리하는 '병렬 일꾼'이에요. AI 학습처럼 같은 계산을 대량으로 돌릴 땐 GPU가 강해서 요즘 수요가 폭발했습니다."),
+        ("요즘 IT 기기가 왜 이렇게 비싸졌어요?",
+         "반도체·메모리 수요가 늘고 환율·부품 값이 오르면서 노트북 같은 IT 기기 가격도 전반적으로 올랐어요. 기술이 좋아진 만큼 값도 오른 부분이 있습니다."),
+    ]),
+]
+
+
+@app.get("/learn", response_class=HTMLResponse)
+def learn_tool():
+    parts = ["<div class='wrap'>",
+             "<div class='hero'><h1>3분 투자 상식</h1>"
+             "<p>연금·투자·경제, 어렵게 느껴지던 것들을<br>가볍게 하나씩 풀어드려요.</p></div>"]
+    for cat, cards in LEARN_CARDS:
+        parts.append(f"<div class='cat'>{html.escape(cat)}</div>")
+        for q, a in cards:
+            parts.append(
+                "<details class='qcard'><summary>"
+                f"<span>{html.escape(q)}</span><span class='arw'>›</span></summary>"
+                f"<div class='ans'>{html.escape(a)}</div></details>")
+    parts.append("<div style='text-align:center'><a class='plink' href='/survey'>내 생각도 남기기 · 투자 설문 →</a></div>")
+    parts.append("<div class='disc'><b>참고</b> 이 콘텐츠는 일반적인 개념을 쉽게 설명한 교육용 자료이며, "
+                 "특정 상품 추천이나 투자 권유가 아닙니다. 투자 결정은 본인의 판단과 책임입니다.</div>")
+    parts.append("<div class='foot'>교육용 참고 자료</div></div>")
+    return public_page("3분 투자 상식", "".join(parts))
+
+
+# 대중용 설문 (회의: '명분' 데이터 장치 · 상품/브랜드 언급 없음)
+SURVEYS = [
+    {"id": "start_age", "q": "연금·투자, 몇 살에 처음 시작하셨나요?",
+     "options": ["20대 이전", "20대", "30대", "40대", "50대 이상", "아직 안 했어요"]},
+    {"id": "monthly", "q": "매달 투자(적립)에 쓰는 금액은 얼마인가요?",
+     "options": ["10만 원 미만", "10~30만 원", "30~50만 원", "50~100만 원", "100만 원 이상"]},
+    {"id": "hesitate", "q": "투자를 망설이는 가장 큰 이유는?",
+     "options": ["뭘 사야 할지 몰라서", "손실이 무서워서", "여윳돈이 없어서", "시간이 없어서", "이미 잘하고 있어서"]},
+]
+
+
+def _survey_tally(qid):
+    rows = _rows("SELECT choice, COUNT(*) FROM survey_votes WHERE qid=? GROUP BY choice", (qid,))
+    return {r[0]: r[1] for r in rows}
+
+
+def _voted_set(request):
+    return set((request.cookies.get("kdx_voted") or "").split(",")) - {""}
+
+
+@app.get("/survey", response_class=HTMLResponse)
+def survey_tool(request: Request):
+    voted = _voted_set(request)
+    parts = ["<div class='wrap'>",
+             "<div class='hero'><h1>이런 거 궁금하지 않아요?</h1>"
+             "<p>다들 어떻게 하고 있는지, 살짝 엿보기.<br>탭하면 바로 결과가 보여요.</p></div>"]
+    for s in SURVEYS:
+        qid = s["id"]
+        parts.append(f"<div class='sq' data-qid='{qid}'><h3>{html.escape(s['q'])}</h3>")
+        if qid in voted:
+            parts.append(_survey_result_html(qid, s))
+        else:
+            parts.append("<div class='opts'>")
+            for opt in s["options"]:
+                parts.append(f"<button class='opt' data-qid='{qid}' data-choice=\"{html.escape(opt, quote=True)}\">{html.escape(opt)}</button>")
+            parts.append("</div><div class='resultslot'></div>")
+        parts.append("</div>")
+    parts.append("<div class='disc'><b>참고</b> 이 설문은 방문자들의 응답을 익명으로 모아 보여주는 참고용 자료입니다. "
+                 "투자 권유가 아니며, 특정 상품과 무관합니다.</div>")
+    parts.append("<div class='foot'>익명 설문 · 참고용</div></div>")
+    return public_page("투자 설문", "".join(parts), extra_head=f"<script>{SURVEY_JS}</script>")
+
+
+def _survey_result_html(qid, s):
+    tally = _survey_tally(qid)
+    total = sum(tally.values()) or 0
+    rows = []
+    for opt in s["options"]:
+        cnt = tally.get(opt, 0)
+        pct = (cnt / total * 100) if total else 0
+        rows.append(
+            f"<div class='bar'><div class='fill' style='width:{pct:.0f}%'></div>"
+            f"<span class='txt'>{html.escape(opt)}</span><span class='pct'>{pct:.0f}%</span></div>")
+    return ("<div class='results'>" + "".join(rows)
+            + f"<div class='total'>총 {total:,}명 참여</div>"
+            + "<div class='voted'>✓ 응답해 주셔서 고마워요</div></div>")
+
+
+SURVEY_JS = """
+(function(){
+  function esc(s){return (s||'').replace(/[&<>\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c];});}
+  document.addEventListener('click',function(e){
+    var b=e.target.closest?e.target.closest('.opt'):null; if(!b) return;
+    var qid=b.getAttribute('data-qid'), choice=b.getAttribute('data-choice');
+    var card=b.closest('.sq'); var slot=card.querySelector('.resultslot'); var opts=card.querySelector('.opts');
+    if(opts) opts.style.opacity='.4';
+    fetch('/survey/vote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({qid:qid,choice:choice})})
+      .then(function(r){return r.json();}).then(function(j){
+        if(!j.ok){ if(opts) opts.style.opacity='1'; return; }
+        if(opts) opts.style.display='none';
+        var total=j.total||0, html='';
+        (j.options||[]).forEach(function(o){
+          var pct=total?Math.round(o.count/total*100):0;
+          html+="<div class='bar'><div class='fill' style='width:"+pct+"%'></div><span class='txt'>"+esc(o.label)+"</span><span class='pct'>"+pct+"%</span></div>";
+        });
+        html+="<div class='total'>총 "+total.toLocaleString()+"명 참여</div><div class='voted'>✓ 응답해 주셔서 고마워요</div>";
+        if(slot) slot.innerHTML=html;
+      }).catch(function(){ if(opts) opts.style.opacity='1'; });
+  });
+})();
+"""
+
+
+@app.post("/survey/vote")
+async def survey_vote(req: Request):
+    try:
+        data = await req.json()
+    except Exception:
+        return JSONResponse({"ok": False}, status_code=400)
+    qid = (data.get("qid") or "").strip()
+    choice = (data.get("choice") or "").strip()
+    s = next((x for x in SURVEYS if x["id"] == qid), None)
+    if not s or choice not in s["options"]:
+        return JSONResponse({"ok": False}, status_code=400)
+    voted = _voted_set(req)
+    if qid not in voted:
+        con = _con()
+        try:
+            con.execute("INSERT INTO survey_votes(qid,choice,ts) VALUES(?,?,?)",
+                        (qid, choice, datetime.now(KST).isoformat()))
+            con.commit()
+        except Exception:
+            pass
+        finally:
+            con.close()
+        voted.add(qid)
+    tally = _survey_tally(qid)
+    total = sum(tally.values())
+    resp = JSONResponse({"ok": True, "total": total,
+                         "options": [{"label": o, "count": tally.get(o, 0)} for o in s["options"]]})
+    resp.set_cookie("kdx_voted", ",".join(sorted(voted)), max_age=60 * 60 * 24 * 180,
+                    httponly=True, samesite="lax")
+    return resp
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     inner = (
@@ -1000,6 +1465,22 @@ def home():
         "<h3>주간 리포트</h3><p>최근 7일 산출물·컴플 판정·집중 상품 흐름을 한 페이지로. 고객사 공유용.</p></a>"
         "<a class='tile' href='/data'><div class='tic'>📊</div>"
         "<h3>시황 데이터</h3><p>집중 상품의 최근 흐름을 공개 데이터 기반 그래프로 봅니다.</p></a>"
+        "</div>"
+        "<div class='dsectitle'>대중용 공개 도구 <span class='muted'>(비밀번호 없이 열림 · 외부 공유용)</span></div>"
+        "<div class='cards'>"
+        "<a class='tile' href='/dividend'><div class='tic'>💰</div>"
+        "<h3>월 배당 계산기</h3><p>얼마 넣으면 매달 얼마? 상품명 없이 즉석 계산. 공유 링크: /dividend</p></a>"
+        "<a class='tile' href='/learn'><div class='tic'>💡</div>"
+        "<h3>3분 투자 상식</h3><p>연금·투자·경제를 쉽게 풀어주는 지식 카드. 공유 링크: /learn</p></a>"
+        "<a class='tile' href='/survey'><div class='tic'>🗳️</div>"
+        "<h3>투자 설문</h3><p>대중 응답을 모아 콘텐츠 명분·데이터로. 공유 링크: /survey</p></a>"
+        "</div>"
+        "<div class='dsectitle'>컴플라이언스</div>"
+        "<div class='cards'>"
+        "<a class='tile' href='/compliance'><div class='tic'>📚</div>"
+        "<h3>컴플 판례집</h3><p>과거 점검한 대본을 판정·표현 유형별로 찾아 통과 사례를 참고합니다.</p></a>"
+        "<a class='tile' href='/rules'><div class='tic'>📐</div>"
+        "<h3>컴플 규칙 사전</h3><p>수익률·분배율·심사필 등 자주 걸리는 표현의 처리 기준.</p></a>"
         "</div>" + FOOT)
     return page("KODEX 시황 브리핑", inner, active="/")
 
@@ -1028,30 +1509,77 @@ def bot_guide():
     return page("텔레그램 봇 안내", inner, active="/bot")
 
 
+def search_archive(needles=None, type_="all", limit=80):
+    """브리핑·브리프·스크립트를 키워드(needles: OR)로 검색해 최신순 통합 리스트로 반환."""
+    needles = [n for n in (needles or []) if n]
+
+    def where(cols):
+        if not needles:
+            return "", []
+        parts, args = [], []
+        for n in needles:
+            parts.append("(" + " OR ".join(f"{c} LIKE ?" for c in cols) + ")")
+            args += [f"%{n}%"] * len(cols)
+        return " WHERE " + " OR ".join(parts), args
+
+    out = []
+    if type_ in ("all", "briefing"):
+        w, a = where(["title", "body"])
+        for bid, ts, kind, title in _rows(
+                f"SELECT id, ts, kind, title FROM briefings{w} ORDER BY id DESC LIMIT ?", tuple(a + [limit])):
+            out.append({"t": kind_label(kind), "tcls": (kind if kind in ("am", "pm") else "plan"),
+                        "ts": ts, "title": (title or "(제목 없음)"), "url": f"/b/{bid}", "badge": ""})
+    if type_ in ("all", "plan"):
+        w, a = where(["request", "body"])
+        for pid, ts, req in _rows(
+                f"SELECT id, ts, request FROM plans{w} ORDER BY id DESC LIMIT ?", tuple(a + [limit])):
+            out.append({"t": "제작 브리프", "tcls": "brief", "ts": ts,
+                        "title": ((req or "(브리프)").strip()[:70]), "url": f"/plan/view/{pid}", "badge": ""})
+    if type_ in ("all", "script"):
+        w, a = where(["request", "body"])
+        for sid, ts, req, vd in _rows(
+                f"SELECT id, ts, request, check_verdict FROM scripts{w} ORDER BY id DESC LIMIT ?", tuple(a + [limit])):
+            out.append({"t": "스크립트", "tcls": "script", "ts": ts,
+                        "title": ((req or "(스크립트)").strip()[:70]), "url": f"/script/view/{sid}",
+                        "badge": verdict_badge(vd)})
+    out.sort(key=lambda x: x["ts"] or "", reverse=True)
+    return out[:limit]
+
+
 @app.get("/archive", response_class=HTMLResponse)
-def archive():
-    rows = list_briefings()
-    parts = ["<header class='mast'><p class='eyebrow'>Briefing Archive</p>"
-             "<h1 class='title'>브리핑 아카이브</h1>"
-             "<p class='sub'>매일 오전·오후 브리핑을 모아 둔 아카이브입니다.</p></header>"]
-    if not rows:
-        parts.append("<div class='empty'>아직 저장된 브리핑이 없습니다.<br>"
-                     "봇에서 <code>/brief</code> 를 보내면 여기에 쌓입니다.</div>")
+def archive(request: Request):
+    q = (request.query_params.get("q") or "").strip()
+    type_ = request.query_params.get("type") or "all"
+    if type_ not in ("all", "briefing", "plan", "script"):
+        type_ = "all"
+    results = search_archive([q] if q else [], type_)
+
+    def opt(val, label):
+        return f"<option value='{val}'{' selected' if type_ == val else ''}>{label}</option>"
+    form = (
+        "<form method='get' action='/archive' class='searchbar'>"
+        f"<input type='text' name='q' value='{html.escape(q)}' placeholder='키워드 검색 (제목·내용)' autocomplete='off'>"
+        "<select name='type'>"
+        + opt("all", "전체") + opt("briefing", "브리핑") + opt("plan", "브리프") + opt("script", "스크립트")
+        + "</select><button type='submit' class='go'>검색</button></form>")
+    parts = ["<header class='mast'><p class='eyebrow'>Archive</p>"
+             "<h1 class='title'>아카이브</h1>"
+             "<p class='sub'>브리핑·제작 브리프·완성 스크립트를 키워드와 종류로 찾아봅니다.</p></header>"
+             + form]
+    if q or type_ != "all":
+        parts.append(f"<div class='reslabel'>검색 결과 {len(results)}건"
+                     + (f" · ‘{html.escape(q)}’" if q else "") + "</div>")
+    if not results:
+        parts.append("<div class='empty'>결과가 없습니다. 다른 키워드로 검색해 보세요.</div>")
     else:
-        cur = None
-        for bid, ts, ymd, kind, source, title in rows:
-            if ymd != cur:
-                cur = ymd
-                parts.append(f"<div class='datehead'>{html.escape(fmt_date(ymd, ts))}</div>")
-            k = kind if kind in ("am", "pm") else ""
+        for r in results:
             parts.append(
-                f"<a class='card {k}' href='/b/{bid}'><div class='meta'>"
-                f"<span class='pill {k}'>{html.escape(kind_label(kind))}</span>"
-                f"<span class='tag'>{html.escape(source_label(source))}</span>"
-                f"<span class='time'>{html.escape(fmt_time(ts))}</span></div>"
-                f"<p class='ctitle'>{html.escape(title or '(제목 없음)')}</p></a>")
+                f"<a class='rrow arow' href='{r['url']}'>"
+                f"<span class='tchip {r['tcls']}'>{html.escape(r['t'])}</span>"
+                f"<span class='atitle'>{html.escape(r['title'])}{r['badge']}</span>"
+                f"<span class='rt'>{html.escape(fmt_time(r['ts']))}</span></a>")
     parts.append(FOOT)
-    return page("브리핑 아카이브", "".join(parts), active="/archive")
+    return page("아카이브", "".join(parts), active="/archive")
 
 
 @app.get("/check", response_class=HTMLResponse)
@@ -1071,8 +1599,101 @@ def check_form():
         f"<button class='go checkbtn' data-input='creq' {disabled}>컴플 체크 실행</button>"
         "<div class='checkstatus statusline'></div>"
         "<div class='checkresult'></div>"
-        "</div></div>" + FOOT)
+        "</div></div>"
+        "<div class='recent'><h3>컴플 참고</h3>"
+        "<a class='rrow' href='/compliance'><span>컴플 판례집 — 과거 점검한 대본을 판정·표현 유형별로 찾기 →</span></a>"
+        "<a class='rrow' href='/rules'><span>컴플 규칙 사전 — 수익률·분배율·심사필 등 표현 처리 기준 →</span></a></div>"
+        + FOOT)
     return page("컴플라이언스 셀프체크", inner, active="/check", extra_head=f"<script>{CHECK_JS}</script>")
+
+
+@app.get("/compliance", response_class=HTMLResponse)
+def compliance_view(request: Request):
+    verdict = request.query_params.get("verdict", "all")
+    tag = request.query_params.get("tag", "all")
+    if verdict not in ("all", "통과", "주의", "수정 필요"):
+        verdict = "all"
+    rows = list_checked(verdict, tag)
+
+    def vchip(val, label):
+        on = " on" if verdict == val else ""
+        href = f"/compliance?verdict={quote(val)}&tag={quote(tag)}"
+        return f"<a class='fchip{on}' href='{href}'>{html.escape(label)}</a>"
+
+    def tchip2(val, label):
+        on = " on" if tag == val else ""
+        href = f"/compliance?verdict={quote(verdict)}&tag={quote(val)}"
+        return f"<a class='fchip{on}' href='{href}'>{html.escape(label)}</a>"
+
+    vfilter = "".join([vchip("all", "전체"), vchip("통과", "통과"),
+                       vchip("주의", "주의"), vchip("수정 필요", "수정 필요")])
+    tfilter = tchip2("all", "전체 유형") + "".join(tchip2(n, n) for n, _ in COMP_TAGS)
+    parts = ["<header class='mast'><p class='eyebrow'>Compliance Archive</p>"
+             "<h1 class='title'>컴플 판례집</h1>"
+             "<p class='sub'>과거 점검한 대본을 판정과 표현 유형(수익률·월배당·분배율·커버드콜 등)으로 찾아, "
+             "통과 사례의 표현 방식을 참고하세요.</p></header>"
+             f"<div class='filterline'><span class='flab'>판정</span>{vfilter}</div>"
+             f"<div class='filterline'><span class='flab'>표현 유형</span>{tfilter}</div>"]
+    if not rows:
+        parts.append("<div class='empty'>해당 조건의 점검 기록이 없습니다. "
+                     "완성 스크립트 화면에서 '컴플 체크'를 실행하면 여기에 쌓입니다.</div>")
+    else:
+        parts.append(f"<div class='reslabel'>{len(rows)}건</div>")
+        for sid, ts, req, vd, tags in rows:
+            parts.append(
+                f"<a class='rrow arow' href='/script/view/{sid}'>"
+                f"<span class='atitle'>🎬 {html.escape((req or '(스크립트)').strip()[:44])}"
+                f"{verdict_badge(vd)}</span>"
+                f"<span class='rt'>{html.escape(fmt_time(ts))}</span></a>"
+                + (f"<div class='ctags rowtags'>{''.join(f'<span class=ctag>{html.escape(t)}</span>' for t in tags.split(',') if t)}</div>" if tags else ""))
+    parts.append(FOOT)
+    return page("컴플 판례집", "".join(parts), active="/check")
+
+
+# 컴플라이언스 규칙 사전 (내부 참고 · 회의 피드백 + 일반 ETF 광고 원칙 반영)
+COMP_RULES = [
+    ("수익률 표기", [
+        "과거 수익률은 미래 수익을 보장하지 않는다는 점을 함께 명시한다.",
+        "수익률을 쓸 때는 상장 이후(설정 이후) 수익률을 함께 표기하고, 기준일을 분명히 강조한다.",
+        "특정 기간만 잘라 유리하게 보이게 하지 않는다. 누적·연평균 등 기준을 분명히 한다.",
+    ]),
+    ("배당·분배율·커버드콜", [
+        "분배율·배당은 확정된 값이 아니며 변동·중단될 수 있음을 전제로 표현한다. 미래 분배를 보장하는 표현은 금지.",
+        "커버드콜류는 분배 재원과 원금 훼손 가능성(분배가 원금에서 나올 수 있음)을 유의해서 다룬다.",
+        "'월 배당', '월 O원' 같은 표현은 가정·예시임을 분명히 하고 특정 상품의 확정 수익처럼 보이지 않게 한다.",
+    ]),
+    ("원금·투자위험", [
+        "예금자보호 대상이 아니며 원금손실(0~100%)이 가능하다는 유의문구를 갖춘다.",
+        "투자위험등급, 자산가격·환율·신용등급 변동에 따른 위험을 누락하지 않는다.",
+    ]),
+    ("필수 고지·심사필", [
+        "합성총보수·위험등급·증권거래비용 등 상품별로 바뀌는 수치는 임의로 쓰지 말고 [확인 필요]로 비운다.",
+        "준법감시인 심사필은 정해진 형식(제 2026-000호, 기간)으로 두고 임의 번호를 만들지 않는다.",
+        "광고 시점 기준이며 미래에는 달라질 수 있음을 밝힌다.",
+    ]),
+    ("표현·톤", [
+        "단정적 투자권유('지금 사세요', '무조건 담아라')와 수익 보장('반드시 오른다') 표현은 금지.",
+        "확인되지 않은 인과를 사실처럼 단정하지 않는다(예: 미확인 'OO 때문에 올랐다'). 완화하거나 근거·출처를 붙인다.",
+        "'역대급', '지금이 마지막 기회' 같은 근거 없는 과장·최상급 표현은 피한다.",
+    ]),
+]
+
+
+@app.get("/rules", response_class=HTMLResponse)
+def rules_view():
+    parts = ["<header class='mast'><p class='eyebrow'>Compliance Rules</p>"
+             "<h1 class='title'>컴플 규칙 사전</h1>"
+             "<p class='sub'>콘텐츠 제작 시 자주 걸리는 표현의 처리 기준을 정리했습니다. "
+             "컴플 셀프체크와 판례집을 함께 쓰면 좋습니다. 최종 기준은 삼성자산운용 준법감시인 심사로 확정됩니다.</p></header>"]
+    for cat, rules in COMP_RULES:
+        items = "".join(f"<li>{html.escape(r)}</li>" for r in rules)
+        parts.append(f"<section class='brief-sec'><h2 class='sec-h'><span class='sec-ic'>📌</span>{html.escape(cat)}</h2>"
+                     f"<ul class='blist'>{items}</ul></section>")
+    parts.append("<div class='recent'><h3>바로가기</h3>"
+                 "<a class='rrow' href='/check'><span>이 대본·문구가 규칙에 맞는지 점검 →</span></a>"
+                 "<a class='rrow' href='/compliance'><span>과거 통과 사례(판례집)에서 표현 방식 참고 →</span></a></div>")
+    parts.append(FOOT)
+    return page("컴플 규칙 사전", "".join(parts), active="/check")
 
 
 @app.get("/report", response_class=HTMLResponse)
@@ -1147,7 +1768,7 @@ def report_view():
     inner = (
         "<header class='mast'><p class='eyebrow'>Weekly Report</p>"
         "<h1 class='title'>주간 리포트</h1>"
-        f"<p class='sub'>{html.escape(rng)} · 최근 7일 활동 요약입니다. </p></header>"
+        f"<p class='sub'>{html.escape(rng)} · 최근 7일 활동 요약입니다. 고객사 공유용으로 이 링크를 그대로 전달하셔도 됩니다.</p></header>"
         + stats + verdict_html + focus_html + briefs_html + scripts_html + FOOT)
     return page("주간 리포트", inner, active="/report")
 
@@ -1259,25 +1880,40 @@ def _run_job(job_id, fn, q, id_field, save_fn):
             JOBS[job_id] = {"status": "error", "error": str(e)[:200]}
 
 
-def _start_text_job(fn, text_in, sid=None):
-    # 저장 없이 결과 HTML을 바로 돌려주는 잡 (컴플 체크용). sid가 있으면 판정을 스크립트에 기록.
+def _start_text_job(fn, text_in, sid=None, kind="check"):
+    # 저장 없이 결과 HTML을 바로 돌려주는 잡. kind=check면 판정 저장, caption이면 캡션 렌더.
     job_id = uuid.uuid4().hex
     with LOCK:
         JOBS[job_id] = {"status": "pending"}
-    threading.Thread(target=_run_text_job, args=(job_id, fn, text_in, sid), daemon=True).start()
+    threading.Thread(target=_run_text_job, args=(job_id, fn, text_in, sid, kind), daemon=True).start()
     return JSONResponse({"job_id": job_id})
 
 
-def _run_text_job(job_id, fn, text_in, sid=None):
+def _run_text_job(job_id, fn, text_in, sid=None, kind="check"):
     try:
         text = fn(text_in)
-        if sid:
-            save_check_verdict(sid, _extract_verdict(text))
+        if kind == "caption":
+            out = render_caption(text)
+        else:
+            if sid:
+                save_check_result(sid, _extract_verdict(text), text, _detect_tags(text_in))
+            out = render_check(text)
         with LOCK:
-            JOBS[job_id] = {"status": "done", "html": render_check(text)}
+            JOBS[job_id] = {"status": "done", "html": out}
     except Exception as e:
         with LOCK:
             JOBS[job_id] = {"status": "error", "error": str(e)[:200]}
+
+
+def _text_in_from(data):
+    sid = data.get("script_id")
+    if sid:
+        try:
+            row = get_script(int(sid))
+        except Exception:
+            row = None
+        return (row[3] if row else ""), (int(sid) if sid else None)
+    return (data.get("request") or "").strip(), None
 
 
 @app.post("/check/run")
@@ -1288,18 +1924,24 @@ async def check_run(req: Request):
         return JSONResponse({"error": "잘못된 요청입니다."}, status_code=400)
     if CHECK_FN is None:
         return JSONResponse({"error": "컴플 체크 기능이 연결되지 않았습니다."}, status_code=503)
-    sid = data.get("script_id")
-    if sid:
-        try:
-            row = get_script(int(sid))
-        except Exception:
-            row = None
-        text_in = row[3] if row else ""
-    else:
-        text_in = (data.get("request") or "").strip()
+    text_in, sid = _text_in_from(data)
     if not text_in:
         return JSONResponse({"error": "점검할 내용이 없습니다."}, status_code=400)
-    return _start_text_job(CHECK_FN, text_in, sid=(int(sid) if sid else None))
+    return _start_text_job(CHECK_FN, text_in, sid=sid, kind="check")
+
+
+@app.post("/caption/run")
+async def caption_run(req: Request):
+    try:
+        data = await req.json()
+    except Exception:
+        return JSONResponse({"error": "잘못된 요청입니다."}, status_code=400)
+    if CAPTION_FN is None:
+        return JSONResponse({"error": "캡션 생성 기능이 연결되지 않았습니다."}, status_code=503)
+    text_in, _sid = _text_in_from(data)
+    if not text_in:
+        return JSONResponse({"error": "내용이 없습니다."}, status_code=400)
+    return _start_text_job(CAPTION_FN, text_in, kind="caption")
 
 
 @app.get("/job/{job_id}")
@@ -1353,28 +1995,45 @@ def script_view(sid: int):
         return page("스크립트를 찾을 수 없음",
                     "<a class='back' href='/plan'>← 제작 브리프로</a>"
                     "<div class='empty'>해당 스크립트를 찾을 수 없습니다.</div>", active="/plan")
-    _id, ts, request, body, plan_id, verdict = row
+    _id, ts, request, body, plan_id, verdict, check_body, check_tags = row
     if plan_id:
         back = f"<a class='back' href='/plan/view/{plan_id}'>← 이 스크립트의 브리프로</a>"
     else:
         back = "<a class='back' href='/plan'>← 제작 브리프로</a>"
+    tag_html = _tag_chips(check_tags)
+    saved_check = (f"<div class='savedcheck'>최근 점검 결과 (저장됨)</div>{render_check(check_body)}"
+                   if check_body else "")
     check_block = ""
     if CHECK_FN:
         check_block = (
             "<section class='brief-sec'>"
             "<h2 class='sec-h'><span class='sec-ic'>🛡️</span>컴플라이언스 셀프체크</h2>"
             "<p class='sec-p'>이 대본에 단정적 투자권유·수익 보장·미확인 인과 단정 등 위험 표현이 없는지 점검합니다. "
+            "점검 결과와 판정은 저장되어 '컴플 판례'에서 유형별로 다시 찾아볼 수 있습니다. "
             "최종 판단은 삼성자산운용 준법 검수로 확정됩니다.</p>"
+            + saved_check +
             "<div class='checkwrap'>"
-            f"<button class='go checkbtn' data-sid='{sid}'>이 대본 컴플 체크</button>"
+            f"<button class='go checkbtn' data-sid='{sid}'>{'다시 점검' if check_body else '이 대본 컴플 체크'}</button>"
             "<div class='checkstatus statusline'></div>"
             "<div class='checkresult'></div>"
+            "</div></section>")
+    caption_block = ""
+    if CAPTION_FN:
+        caption_block = (
+            "<section class='brief-sec'>"
+            "<h2 class='sec-h'><span class='sec-ic'>#️⃣</span>업로드 캡션·해시태그</h2>"
+            "<p class='sec-p'>이 대본으로 유튜브 쇼츠·릴스 설명란에 넣을 캡션과 해시태그를 만듭니다.</p>"
+            "<div class='capwrap'>"
+            f"<button class='go capbtn' data-sid='{sid}'>캡션·해시태그 생성</button>"
+            "<div class='capstatus statusline'></div>"
+            "<div class='capresult'></div>"
             "</div></section>")
     inner = (back +
              f"<h1 class='dtitle' style='margin-top:14px'>완성 스크립트{verdict_badge(verdict)}</h1>"
              f"<div class='dmeta'>입력: {html.escape((request or '').strip()[:120])} · {html.escape(fmt_time(ts))}</div>"
-             + render_script(body) + check_block + FOOT)
-    return page("완성 스크립트", inner, active="/plan", extra_head=f"<script>{CHECK_JS}</script>")
+             + tag_html + render_script(body) + check_block + caption_block + FOOT)
+    return page("완성 스크립트", inner, active="/plan",
+                extra_head=f"<script>{CHECK_JS}</script><script>{CAPTION_JS}</script>")
 
 
 @app.get("/data", response_class=HTMLResponse)
@@ -1393,7 +2052,8 @@ def data_view():
         for idx, item in enumerate(focus):
             parts.append(_data_card(item["name"], item["code"], item.get("series") or [],
                                     f"g{idx}", competitor=comp.get(item["code"]),
-                                    news=news.get(item["code"])))
+                                    news=news.get(item["code"]),
+                                    detail_url=f"/product/{item['code']}"))
             got = got or len(item.get("series") or []) >= 2
         if not got and not (kospi and len(kospi) >= 2):
             parts.append("<div class='empty'>시세 데이터를 가져오지 못했습니다. 잠시 후 새로고침해 주세요.</div>")
@@ -1401,3 +2061,43 @@ def data_view():
         parts.append("<div class='empty'>표시할 집중 상품이 없습니다.</div>")
     parts.append(FOOT)
     return page("시황 데이터", "".join(parts), active="/data", extra_head=f"<script>{DATA_JS}</script>")
+
+
+@app.get("/product/{code}", response_class=HTMLResponse)
+def product_view(code: str):
+    prod = next((p for p in settings.FOCUS_PRODUCTS if p["code"] == code), None)
+    if not prod:
+        return page("상품을 찾을 수 없음",
+                    "<a class='back' href='/data'>← 시황 데이터로</a>"
+                    "<div class='empty'>집중 상품 목록에 없는 종목코드입니다.</div>", active="/data")
+    name = prod["name"]
+    focus, _kospi, comp = get_market()
+    item = next((f for f in focus if f["code"] == code), None)
+    series = (item.get("series") if item else []) or []
+    news = get_all_news().get(code)
+    card = _data_card(name, code, series, "gp", competitor=comp.get(code), news=news)
+
+    related = search_archive([code, name], "all", 60)
+    if related:
+        rrows = "".join(
+            f"<a class='rrow arow' href='{r['url']}'>"
+            f"<span class='tchip {r['tcls']}'>{html.escape(r['t'])}</span>"
+            f"<span class='atitle'>{html.escape(r['title'])}{r['badge']}</span>"
+            f"<span class='rt'>{html.escape(fmt_time(r['ts']))}</span></a>"
+            for r in related)
+        related_html = f"<div class='rsec'><h3>이 상품 관련 콘텐츠 <span class='muted'>({len(related)}건)</span></h3>{rrows}</div>"
+    else:
+        related_html = ("<div class='rsec'><h3>이 상품 관련 콘텐츠</h3>"
+                        "<div class='empty'>아직 이 상품으로 만든 브리프·스크립트가 없습니다. "
+                        "제작 브리프에서 만들어 보세요.</div></div>")
+
+    inner = (
+        "<a class='back' href='/data'>← 시황 데이터로</a>"
+        f"<header class='mast' style='margin-top:12px'><p class='eyebrow'>Product</p>"
+        f"<h1 class='title'>{html.escape(name)}</h1>"
+        f"<p class='sub'>종목코드 {html.escape(code)} · 최근 흐름, 오늘의 시황 소재, 관련 콘텐츠를 한곳에서.</p></header>"
+        + card + related_html
+        + "<div style='margin-top:16px'>"
+        f"<a class='go' style='display:inline-block;text-decoration:none' href='/plan'>이 상품으로 제작 브리프 만들기</a></div>"
+        + FOOT)
+    return page(name, inner, active="/data", extra_head=f"<script>{DATA_JS}</script>")
