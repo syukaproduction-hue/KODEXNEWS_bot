@@ -41,12 +41,14 @@ WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "KODEX")
 AUTH_TOKEN = hashlib.sha256(("kdx:" + WEB_PASSWORD).encode()).hexdigest()
 AUTH_COOKIE = "kdx_auth"
-GATE_EXEMPT = {"/login", "/login/auth", "/robots.txt", "/logo.svg",
-               "/dividend", "/learn", "/survey", "/survey/vote"}
+GATE_EXEMPT = {"/login", "/login/auth", "/robots.txt", "/logo.svg", "/favicon.svg", "/favicon.ico",
+               "/tools", "/dividend", "/learn", "/survey", "/survey/vote", "/survey/comment"}
 
 _BASE = Path(__file__).parent
 LOGO_PATH = _BASE / "logo_kodex_ko.svg"
+FAVICON_PATH = _BASE / "favicon_kodex.svg"
 _LOGO_CACHE = None
+_FAVICON_CACHE = None
 
 JOBS = {}
 LOCK = threading.Lock()
@@ -82,6 +84,8 @@ def _con():
         code TEXT PRIMARY KEY, title TEXT, url TEXT, comp_name TEXT, comp_code TEXT, updated_at TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS survey_votes(
         qid TEXT, choice TEXT, ts TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS survey_comments(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, text TEXT)""")
     for col in ("comp_name", "comp_code"):
         try:
             con.execute(f"ALTER TABLE product_news ADD COLUMN {col} TEXT")  # 기존 테이블 대비
@@ -767,6 +771,9 @@ ul.clist{margin:4px 0 8px;padding-left:18px} ul.clist li{margin:5px 0;font-size:
 .wchg{font-family:var(--mono);font-size:13px;font-weight:700;white-space:nowrap}
 .wchg.up{color:#D31A2B} .wchg.down{color:#0B4EA2}
 .wchg .muted{color:var(--muted);font-weight:400}
+.cmtrow{padding:12px 0;border-bottom:1px solid var(--line)}
+.cmttext{font-size:14.5px;color:var(--ink);line-height:1.6;overflow-wrap:anywhere;white-space:pre-wrap}
+.cmtts{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:4px}
 .capwrap{margin-top:14px}
 .capbox{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-top:8px}
 pre.captext{white-space:pre-wrap;word-break:break-word;font-family:var(--sans);font-size:14.5px;line-height:1.6;color:var(--ink);margin:0 0 12px}
@@ -870,7 +877,7 @@ def page(title, inner, active="", extra_head=""):
         "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<meta name='robots' content='noindex, nofollow'>"
-        "<meta name='theme-color' content='#0B4EA2'>"
+        "<meta name='theme-color' content='#0B4EA2'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         f"<title>{html.escape(title)}</title>{FONT}<style>{CSS}</style>{extra_head}</head>"
         f"<body>{_nav(active)}<div class='wrap'>{inner}</div></body></html>")
 
@@ -1051,6 +1058,21 @@ def logo_svg():
                     headers={"Cache-Control": "public, max-age=86400"})
 
 
+@app.get("/favicon.svg")
+@app.get("/favicon.ico")
+def favicon():
+    global _FAVICON_CACHE
+    if _FAVICON_CACHE is None:
+        try:
+            _FAVICON_CACHE = FAVICON_PATH.read_text(encoding="utf-8")
+        except Exception:
+            _FAVICON_CACHE = ""
+    if not _FAVICON_CACHE:
+        return Response(status_code=404)
+    return Response(_FAVICON_CACHE, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     if _authed(request):
@@ -1080,7 +1102,7 @@ def login_page(request: Request):
     return HTMLResponse(
         "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0B4EA2'>"
+        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0B4EA2'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         f"<title>로그인 · KODEX 시황</title>{FONT}<style>{CSS}</style>{js}</head>"
         f"<body>{body}</body></html>")
 
@@ -1110,82 +1132,108 @@ def logout():
     return resp
 
 
-# ---------- 대중용 공개 도구: 월 배당 계산기 (비밀번호 없음, 브랜드·상품명 없음) ----------
+# ---------- 대중용 공개 도구: 월 배당 계산기 (KODEX 상품 기반 · PlayStation 스타일 디자인 참고) ----------
 DIVIDEND_CSS = """
-*{box-sizing:border-box} :root{--bg:#0E1730;--card:#17213C;--line:#2A375A;--ink:#EAF0FF;--sub:#9FB0D6;--accent:#4C8DFF;--accent2:#8AB4FF;--good:#37D39B}
-html,body{margin:0} body{font-family:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;background:radial-gradient(1200px 600px at 50% -10%,#1b2a52 0,#0E1730 60%),#0E1730;color:var(--ink);min-height:100vh}
-.wrap{max-width:520px;margin:0 auto;padding:28px 18px 60px}
-.hero{text-align:center;padding:14px 0 8px}
-.hero h1{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:0 0 8px}
-.hero p{color:var(--sub);font-size:14.5px;line-height:1.6;margin:0}
-.tabs{display:flex;gap:8px;margin:22px 0 16px}
-.tab{flex:1;text-align:center;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--sub);font-weight:700;font-size:14px;cursor:pointer;transition:.15s}
-.tab.on{background:linear-gradient(135deg,var(--accent),#6F7BFF);color:#fff;border-color:transparent}
-.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px}
-.field{margin-bottom:18px}
-.field label{display:block;font-size:13px;color:var(--sub);margin-bottom:8px;font-weight:600}
+*{box-sizing:border-box}
+:root{--dark:#0A0A0B;--card-d:#171719;--light:#ffffff;--soft:#F4F6FB;--hair:#E9ECF3;--ink:#0A0A0B;--body:rgba(0,0,0,.62);--mute:#6B6B6B;--ondark:#ffffff;--bodydark:rgba(255,255,255,.72);--mutedark:rgba(255,255,255,.5);--blue:#1454FF;--bluep:#0F3FCC;--up:#D31A2B;--down:#0B4EA2}
+html,body{margin:0}
+body{font-family:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;background:var(--light);color:var(--ink);-webkit-font-smoothing:antialiased}
+.band{padding:64px 22px}
+@media(min-width:640px){.band{padding:88px 32px}}
+.band.dark{background:var(--dark);color:var(--ondark)}
+.band.soft{background:var(--soft)}
+.band.blue{background:var(--blue);color:#fff}
+.inner{max-width:600px;margin:0 auto}
+.eyebrow{font-size:12px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;margin:0 0 14px;opacity:.6}
+.blue .eyebrow,.dark .eyebrow{opacity:.75}
+.h1{font-weight:300;font-size:clamp(31px,7.5vw,54px);line-height:1.16;letter-spacing:-.6px;margin:0}
+.h2{font-weight:300;font-size:clamp(24px,5.6vw,35px);line-height:1.2;letter-spacing:-.2px;margin:0 0 6px}
+.lead{font-size:16.5px;line-height:1.62;margin:16px 0 0}
+.dark .lead{color:var(--bodydark)} .band:not(.dark):not(.blue) .lead{color:var(--body)}
+.scrollcue{margin-top:30px;font-size:13px;color:var(--mutedark);letter-spacing:.05em}
+.pill{display:inline-flex;align-items:center;justify-content:center;border:none;border-radius:9999px;font-weight:700;font-size:16px;letter-spacing:.3px;padding:15px 30px;cursor:pointer;background:var(--blue);color:#fff;text-decoration:none}
+.pill:active{background:var(--bluep)}
+.pill.ghost{background:transparent;border:1px solid rgba(255,255,255,.4);color:#fff}
+.field{margin-top:26px}
+.field>label{display:block;font-size:13px;color:var(--mute);font-weight:600;margin-bottom:9px}
 .amt{position:relative}
-.amt input{width:100%;padding:14px 42px 14px 14px;font-size:20px;font-weight:800;border:1px solid var(--line);border-radius:12px;background:#0F1830;color:var(--ink);text-align:right}
-.amt input:focus{outline:none;border-color:var(--accent)}
-.amt .unit{position:absolute;right:14px;top:50%;transform:translateY(-50%);color:var(--sub);font-weight:700}
-.quick{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
-.quick button{flex:1;min-width:60px;padding:8px;border:1px solid var(--line);background:#0F1830;color:var(--accent2);border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer}
-.slider label{display:flex;justify-content:space-between}
-.slider .yv{color:var(--accent2);font-weight:800}
-input[type=range]{width:100%;accent-color:var(--accent);height:26px}
-.rangehint{display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-top:-2px}
-.result{margin-top:8px;text-align:center;background:linear-gradient(135deg,#132a52,#141d38);border:1px solid #315089;border-radius:16px;padding:22px}
-.result .lab{font-size:13px;color:var(--accent2);font-weight:700;margin-bottom:6px}
-.result .big{font-size:34px;font-weight:900;letter-spacing:-.02em;line-height:1.15}
-.result .sub{font-size:13px;color:var(--sub);margin-top:8px;line-height:1.5}
-.share{margin-top:14px;width:100%;padding:13px;border-radius:12px;border:none;background:#22315a;color:var(--ink);font-weight:700;font-size:14px;cursor:pointer}
-.disc{margin-top:20px;font-size:11.5px;color:#8394BC;line-height:1.7;background:#111a33;border:1px solid var(--line);border-radius:12px;padding:14px}
-.disc b{color:#AFC0E6}
-.foot{text-align:center;color:#6B7BA6;font-size:11px;margin-top:22px}
+.amt input{width:100%;padding:16px 44px 16px 16px;font-size:24px;font-weight:800;letter-spacing:-.5px;border:1px solid var(--hair);border-radius:8px;background:#fff;color:var(--ink);text-align:right}
+.amt input:focus{outline:none;border:2px solid var(--blue);padding:15px 43px 15px 15px}
+.amt .u{position:absolute;right:16px;top:50%;transform:translateY(-50%);color:var(--mute);font-weight:700}
+.quick{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}
+.quick button{flex:1;min-width:62px;padding:9px;border:1px solid var(--hair);background:#fff;color:var(--blue);border-radius:9999px;font-size:12.5px;font-weight:700;cursor:pointer}
+.themes{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.theme{flex:1;min-width:120px;text-align:left;padding:14px 15px;border:1px solid var(--hair);background:#fff;border-radius:10px;cursor:pointer}
+.theme.on{border:2px solid var(--blue);padding:13px 14px}
+.theme .tn{font-weight:700;font-size:14.5px}
+.theme .td{font-size:12px;color:var(--mute);margin-top:3px}
+.result{margin-top:26px;background:var(--dark);color:#fff;border-radius:14px;padding:26px 22px;text-align:center}
+.result .rl{font-size:13px;color:var(--mutedark);font-weight:600}
+.result .rb{font-size:clamp(32px,9vw,46px);font-weight:800;letter-spacing:-1px;margin:6px 0;line-height:1.05}
+.result .rs{font-size:13.5px;color:var(--bodydark)}
+.pcards{margin-top:16px;display:grid;gap:10px}
+.pc{background:#fff;border:1px solid var(--hair);border-radius:10px;padding:15px 16px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+.pc .pl{min-width:0}
+.pc .pn{font-weight:600;font-size:14.5px;line-height:1.35;overflow-wrap:anywhere}
+.pc .pt{font-size:11.5px;color:var(--mute);margin-top:3px}
+.pc .py{font-family:ui-monospace,monospace;font-weight:800;font-size:15px;color:var(--blue);white-space:nowrap}
+.pc .pw{font-size:11px;color:var(--mute);text-align:right;margin-top:2px}
+.card{background:#fff;border-radius:14px;padding:22px}
+.disc{font-size:12px;color:#7A7F8C;line-height:1.75}
+.disc b{color:#3A3F4C}
+.disc ul{margin:10px 0 0;padding-left:16px} .disc li{margin:4px 0}
+.sealbox{margin-top:16px;font-size:11.5px;color:#9AA0AD;border-top:1px solid var(--hair);padding-top:12px}
+.foot{color:rgba(255,255,255,.6);font-size:12px;margin-top:14px}
+.brandrow{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.brandrow img{height:22px}
 """
 
 DIVIDEND_JS = """
 (function(){
-  var mode=1;
+  var B={
+   max:{label:'높은 월배당', desc:'커버드콜 중심, 분배율 최대화', items:[
+     {n:'KODEX 미국나스닥100데일리커버드콜OTM',c:'494300',t:'해외주식',y:21.25,w:34},
+     {n:'KODEX 200타겟위클리커버드콜',c:'498400',t:'국내주식',y:18.57,w:33},
+     {n:'KODEX 금융고배당TOP10타겟위클리커버드콜',c:'498410',t:'국내주식',y:15.75,w:33}]},
+   us:{label:'미국 성장+배당', desc:'미국 대표지수·AI·배당', items:[
+     {n:'KODEX 미국AI테크TOP10타겟커버드콜',c:'483280',t:'해외주식',y:15.47,w:34},
+     {n:'KODEX 미국S&P500데일리커버드콜OTM',c:'0005A0',t:'해외주식',y:15.33,w:33},
+     {n:'KODEX 미국배당다우존스타겟커버드콜',c:'483290',t:'해외주식',y:11.91,w:33}]},
+   stable:{label:'안정 배분', desc:'주식+채권+리츠로 분산', items:[
+     {n:'KODEX 200타겟위클리커버드콜',c:'498400',t:'국내주식',y:18.57,w:34},
+     {n:'KODEX 미국30년국채타겟커버드콜(합성 H)',c:'481060',t:'채권',y:12.36,w:33},
+     {n:'KODEX 한국부동산리츠인프라',c:'476800',t:'부동산',y:8.22,w:33}]}
+  };
+  var cur='max';
   var $=function(id){return document.getElementById(id);};
-  function won(n){ n=Math.max(0,Math.round(n));
+  function esc(s){return (s||'').replace(/[&<>\"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c];});}
+  function won(n){n=Math.max(0,Math.round(n));
     if(n>=100000000){var e=Math.floor(n/100000000),m=Math.round((n%100000000)/10000);return e+'억'+(m?' '+m.toLocaleString()+'만':'')+'원';}
     if(n>=10000){return Math.round(n/10000).toLocaleString()+'만원';}
     return n.toLocaleString()+'원';}
   function num(v){return parseFloat((v||'').toString().replace(/[^0-9.]/g,''))||0;}
-  function fmt(el){var v=num(el.value);el.value=v?v.toLocaleString():'';}
+  function blend(k){var s=0;B[k].items.forEach(function(o){s+=o.y*o.w;});return s/100;}
   function calc(){
-    var y=parseFloat($('yield').value); $('yv').textContent=y.toFixed(1)+'%';
-    if(mode===1){
-      var amt=num($('amt').value); var monthly=amt*(y/100)/12;
-      $('rlab').textContent='매달 예상 수령액 (가정)';
-      $('rbig').textContent='월 '+won(monthly);
-      $('rsub').textContent='연 '+won(monthly*12)+' · 연 분배율 '+y+'% 가정 · 세전·비용 미반영';
-    } else {
-      var tgt=num($('tgt').value); var need=(y>0)?(tgt*12/(y/100)):0;
-      $('rlab').textContent='필요한 투자 원금 (가정)';
-      $('rbig').textContent=won(need);
-      $('rsub').textContent='매달 '+won(tgt)+' 받으려면 · 연 분배율 '+y+'% 가정 · 세전·비용 미반영';
-    }
+    var amt=num($('amt').value); var bl=blend(cur); var monthly=amt*(bl/100)/12;
+    $('rb').textContent='월 '+won(monthly);
+    $('rs').textContent='연 '+won(monthly*12)+' · 블렌드 연분배율 약 '+bl.toFixed(1)+'% 가정 · 세전';
+    var h='';
+    B[cur].items.forEach(function(o){
+      h+="<div class='pc'><div class='pl'><div class='pn'>"+esc(o.n)+"</div><div class='pt'>"+esc(o.t)+" · "+o.c+"</div></div>"
+        +"<div><div class='py'>"+o.y.toFixed(1)+"%</div><div class='pw'>비중 "+o.w+"%</div></div></div>";
+    });
+    $('pcards').innerHTML=h;
   }
-  function setMode(m){ mode=m;
-    $('t1').classList.toggle('on',m===1); $('t2').classList.toggle('on',m===2);
-    $('box1').style.display=(m===1)?'block':'none'; $('box2').style.display=(m===2)?'block':'none';
+  function setTheme(k){cur=k;
+    ['max','us','stable'].forEach(function(x){var el=$('th_'+x);if(el)el.classList.toggle('on',x===k);});
     calc();
   }
   window.addEventListener('DOMContentLoaded',function(){
-    $('t1').addEventListener('click',function(){setMode(1);});
-    $('t2').addEventListener('click',function(){setMode(2);});
-    ['amt','tgt'].forEach(function(id){var el=$(id);el.addEventListener('input',function(){fmt(el);calc();});});
-    $('yield').addEventListener('input',calc);
+    var el=$('amt'); el.addEventListener('input',function(){var v=num(el.value);el.value=v?v.toLocaleString():'';calc();});
+    ['max','us','stable'].forEach(function(k){var b=$('th_'+k);if(b)b.addEventListener('click',function(){setTheme(k);});});
     document.querySelectorAll('.quick button').forEach(function(b){
-      b.addEventListener('click',function(){var t=$(b.getAttribute('data-t'));t.value=parseInt(b.getAttribute('data-v')).toLocaleString();calc();});
-    });
-    $('share').addEventListener('click',function(){
-      if(navigator.share){navigator.share({title:'월 배당 계산기',url:location.href});}
-      else if(navigator.clipboard){navigator.clipboard.writeText(location.href);$('share').textContent='링크가 복사됐어요';}
-    });
-    setMode(1);
+      b.addEventListener('click',function(){$('amt').value=parseInt(b.getAttribute('data-v')).toLocaleString();calc();});});
+    setTheme('max');
   });
 })();
 """
@@ -1193,52 +1241,64 @@ DIVIDEND_JS = """
 
 @app.get("/dividend", response_class=HTMLResponse)
 def dividend_tool():
+    def theme(k, label, desc):
+        return (f"<button class='theme' id='th_{k}'><div class='tn'>{label}</div>"
+                f"<div class='td'>{desc}</div></button>")
     body = (
-        "<div class='wrap'>"
-        "<div class='hero'><h1>월 배당 계산기</h1>"
-        "<p>얼마를 넣으면 매달 얼마나 받을까?<br>반대로 매달 원하는 금액을 받으려면 얼마가 필요할까?</p></div>"
-        "<div class='tabs'><div id='t1' class='tab on'>금액 → 월 수령</div>"
-        "<div id='t2' class='tab'>목표 월수령 → 필요 금액</div></div>"
-        "<div class='card'>"
-        # 모드1
-        "<div id='box1'>"
+        "<section class='band dark'><div class='inner'>"
+        "<p class='eyebrow'>월 배당 만들기</p>"
+        "<h1 class='h1'>매달 들어오는 돈,<br>얼마면 만들 수 있을까?</h1>"
+        "<p class='lead'>목표 금액을 넣으면, 실제 KODEX 월배당 ETF로 짠 예시 포트폴리오와 "
+        "예상 월 분배금을 보여드립니다.</p>"
+        "<div class='scrollcue'>아래로 내려서 계산해 보세요 ↓</div>"
+        "</div></section>"
+
+        "<section class='band'><div class='inner'>"
+        "<h2 class='h2'>얼마를 넣으면 매달 얼마?</h2>"
         "<div class='field'><label>투자 금액</label>"
-        "<div class='amt'><input id='amt' inputmode='numeric' placeholder='0' value='200,000,000'><span class='unit'>원</span></div>"
+        "<div class='amt'><input id='amt' inputmode='numeric' value='100,000,000'><span class='u'>원</span></div>"
         "<div class='quick'>"
-        "<button data-t='amt' data-v='10000000'>1천만</button>"
-        "<button data-t='amt' data-v='50000000'>5천만</button>"
-        "<button data-t='amt' data-v='100000000'>1억</button>"
-        "<button data-t='amt' data-v='300000000'>3억</button></div></div>"
-        "</div>"
-        # 모드2
-        "<div id='box2' style='display:none'>"
-        "<div class='field'><label>목표 월 수령액</label>"
-        "<div class='amt'><input id='tgt' inputmode='numeric' placeholder='0' value='3,000,000'><span class='unit'>원</span></div>"
-        "<div class='quick'>"
-        "<button data-t='tgt' data-v='1000000'>100만</button>"
-        "<button data-t='tgt' data-v='2000000'>200만</button>"
-        "<button data-t='tgt' data-v='3000000'>300만</button>"
-        "<button data-t='tgt' data-v='5000000'>500만</button></div></div>"
-        "</div>"
-        # 분배율 슬라이더
-        "<div class='field slider'><label>연 분배율 가정 <span class='yv' id='yv'>8.0%</span></label>"
-        "<input id='yield' type='range' min='1' max='20' step='0.5' value='8'>"
-        "<div class='rangehint'><span>1%</span><span>20%</span></div></div>"
-        # 결과
-        "<div class='result'><div class='lab' id='rlab'>매달 예상 수령액 (가정)</div>"
-        "<div class='big' id='rbig'>월 0원</div><div class='sub' id='rsub'></div></div>"
-        "<button id='share' class='share'>계산기 공유하기</button>"
-        "</div>"
-        # 컴플 안내
-        "<div class='disc'><b>꼭 확인하세요.</b> 이 계산기는 여러분이 직접 입력한 가정(연 분배율)에 따른 단순 산수 결과입니다. "
-        "특정 금융상품의 수익률이 아니며, 미래의 수익이나 배당을 보장하지 않습니다. "
-        "세금·수수료 등 비용은 반영되어 있지 않습니다. 투자 권유가 아닌 교육용 참고 자료입니다.</div>"
-        "<div class='foot'>교육용 참고 도구 · 실제 투자 결정은 본인의 판단과 책임입니다.</div>"
-        "</div>")
+        "<button data-v='50000000'>5천만</button><button data-v='100000000'>1억</button>"
+        "<button data-v='300000000'>3억</button><button data-v='500000000'>5억</button></div></div>"
+        "<div class='field'><label>투자 스타일</label><div class='themes'>"
+        + theme("max", "높은 월배당", "분배율 최대화")
+        + theme("us", "미국 성장+배당", "미국·AI·배당")
+        + theme("stable", "안정 배분", "주식+채권+리츠")
+        + "</div></div>"
+        "<div class='result'><div class='rl'>예상 월 분배금 (가정)</div>"
+        "<div class='rb' id='rb'>월 0원</div><div class='rs' id='rs'></div></div>"
+        "<div class='field'><label>이 스타일의 예시 포트폴리오 (KODEX)</label>"
+        "<div class='pcards' id='pcards'></div></div>"
+        "</div></section>"
+
+        "<section class='band blue'><div class='inner'>"
+        "<div class='brandrow'><img src='/logo.svg' alt='KODEX' style='filter:brightness(0) invert(1)'></div>"
+        "<h2 class='h2' style='color:#fff'>월배당, KODEX로 직접 짜보세요</h2>"
+        "<p class='lead' style='color:rgba(255,255,255,.85)'>위 예시는 삼성자산운용 KODEX의 월배당 ETF로 구성했습니다. "
+        "월배당이 처음이라면 개념부터 가볍게 알아보세요.</p>"
+        "<div style='margin-top:22px'><a class='pill ghost' href='/learn'>월배당이 뭐예요? →</a></div>"
+        "</div></section>"
+
+        "<section class='band soft'><div class='inner'>"
+        "<div class='card'><div class='disc'>"
+        "<b>투자 유의사항</b>"
+        "<ul>"
+        "<li>본 결과는 삼성자산운용이 제공하는 예시로, 투자 참고용 단순 자료이며 투자 권유가 아닙니다.</li>"
+        "<li>분배금은 세전 기준이며, 연분배율은 최근 분배율을 연 환산(×12)한 가정치로 실제와 다를 수 있습니다.</li>"
+        "<li>과거의 운용실적이 미래의 수익률·분배를 보장하지 않습니다.</li>"
+        "<li>이 금융상품은 예금자보호법에 따라 보호되지 않으며, 자산가격·환율·신용등급 변동 등에 따라 투자원금의 손실(0~100%)이 발생할 수 있고 그 손실은 투자자에게 귀속됩니다.</li>"
+        "<li>이익금 분배는 운용결과에 따라 변동될 수 있으며, 이익금을 초과하여 분배하는 경우 투자원금이 감소할 수 있습니다.</li>"
+        "<li>ETF 거래수수료·기타비용이 별도로 발생할 수 있으며, 투자하는 계좌에 따라 분배 세금 기준이 달라질 수 있습니다.</li>"
+        "<li>투자자는 집합투자증권에 대하여 [간이]투자설명서 및 집합투자규약을 반드시 확인하시기 바랍니다.</li>"
+        "</ul>"
+        "<div class='sealbox'>삼성자산운용 준법감시인 심사필 제 20XX-XXXX호 [준법 검수 후 기재] · 상품별 합성총보수·위험등급은 각 상품 상세를 확인하세요.</div>"
+        "</div></div>"
+        "<div style='text-align:center'><div class='foot' style='color:#9AA0AD'>ⓒ 삼성자산운용 · 교육용 참고 자료</div></div>"
+        "</div></section>")
     return HTMLResponse(
         "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0E1730'>"
+        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0A0A0B'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         f"<title>월 배당 계산기</title>{FONT}<style>{DIVIDEND_CSS}</style>"
         f"<script>{DIVIDEND_JS}</script></head><body>{body}</body></html>")
 
@@ -1267,11 +1327,19 @@ html,body{margin:0} body{font-family:'Pretendard Variable',Pretendard,-apple-sys
 .sq .bar .txt{position:absolute;left:12px;top:0;bottom:0;display:flex;align-items:center;font-size:13.5px;font-weight:700;z-index:1}
 .sq .bar .pct{position:absolute;right:12px;top:0;bottom:0;display:flex;align-items:center;font-size:13px;font-weight:800;color:var(--accent2);z-index:1}
 .sq .voted{font-size:12px;color:var(--good);margin-top:6px}
+.sq .cmt{width:100%;padding:12px;border:1px solid var(--line);border-radius:11px;background:#0F1830;color:var(--ink);font-size:14.5px;font-family:inherit;resize:vertical;margin-bottom:10px}
+.sq .cmt:focus{outline:none;border-color:var(--accent)}
 .sq .total{font-size:12px;color:var(--sub);margin-top:8px}
 .disc{margin-top:20px;font-size:11.5px;color:#8394BC;line-height:1.7;background:#111a33;border:1px solid var(--line);border-radius:12px;padding:14px}
 .disc b{color:#AFC0E6}
 .foot{text-align:center;color:#6B7BA6;font-size:11px;margin-top:22px}
 .plink{display:inline-block;margin:14px auto 0;color:var(--accent2);font-size:13px;text-decoration:none;font-weight:600}
+.ptiles{display:grid;gap:12px;margin-top:8px}
+.ptile{display:block;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;text-decoration:none;color:var(--ink);transition:.15s}
+.ptile:hover{border-color:var(--accent)}
+.pemoji{font-size:30px;margin-bottom:8px}
+.pt-t{font-size:17px;font-weight:800;margin-bottom:4px}
+.pt-d{font-size:13.5px;color:var(--sub);line-height:1.5}
 """
 
 
@@ -1279,9 +1347,29 @@ def public_page(title, body, extra_head=""):
     return HTMLResponse(
         "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0E1730'>"
+        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0E1730'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         f"<title>{html.escape(title)}</title>{FONT}<style>{PUBLIC_CSS}</style>{extra_head}"
         f"<body>{body}</body></html>")
+
+
+@app.get("/tools", response_class=HTMLResponse)
+def tools_hub():
+    def tile(href, emoji, title, desc):
+        return (f"<a class='ptile' href='{href}'><div class='pemoji'>{emoji}</div>"
+                f"<div class='pt-t'>{html.escape(title)}</div>"
+                f"<div class='pt-d'>{html.escape(desc)}</div></a>")
+    body = (
+        "<div class='wrap'>"
+        "<div class='hero'><h1>돈 공부, 가볍게 시작하기</h1>"
+        "<p>계산해 보고, 알아보고, 다들 어떻게 하는지 살펴보세요.</p></div>"
+        "<div class='ptiles'>"
+        + tile("/dividend", "💰", "월 배당 계산기", "얼마 넣으면 매달 얼마? 반대로도 계산해 봐요.")
+        + tile("/learn", "💡", "3분 투자 상식", "연금·투자·경제를 아주 쉽게 하나씩.")
+        + tile("/survey", "🗳️", "투자 설문", "다들 어떻게 하고 있는지 살짝 엿보기.")
+        + "</div>"
+        "<div class='foot'>교육용 참고 자료 · 투자 권유가 아닙니다.</div>"
+        "</div>")
+    return public_page("돈 공부 가볍게", body)
 
 
 # 대중용 지식 카드 (연금·투자·경제 기초 · 상품/브랜드/ETF 언급 없음, 교육용)
@@ -1367,6 +1455,11 @@ def survey_tool(request: Request):
                 parts.append(f"<button class='opt' data-qid='{qid}' data-choice=\"{html.escape(opt, quote=True)}\">{html.escape(opt)}</button>")
             parts.append("</div><div class='resultslot'></div>")
         parts.append("</div>")
+    parts.append(
+        "<div class='sq'><h3>투자하면서 궁금하거나 하고 싶은 말이 있다면?</h3>"
+        "<textarea id='cmt' class='cmt' rows='3' maxlength='500' placeholder='자유롭게 남겨주세요. (선택)'></textarea>"
+        "<button id='cmtgo' class='opt' style='text-align:center'>의견 보내기</button>"
+        "<div id='cmtmsg' class='voted' style='display:none'>✓ 소중한 의견 고마워요</div></div>")
     parts.append("<div class='disc'><b>참고</b> 이 설문은 방문자들의 응답을 익명으로 모아 보여주는 참고용 자료입니다. "
                  "투자 권유가 아니며, 특정 상품과 무관합니다.</div>")
     parts.append("<div class='foot'>익명 설문 · 참고용</div></div>")
@@ -1409,6 +1502,19 @@ SURVEY_JS = """
         if(slot) slot.innerHTML=html;
       }).catch(function(){ if(opts) opts.style.opacity='1'; });
   });
+  document.addEventListener('DOMContentLoaded',function(){
+    var go=document.getElementById('cmtgo'); if(!go) return;
+    go.addEventListener('click',function(){
+      var t=(document.getElementById('cmt').value||'').trim(); if(!t) return;
+      go.disabled=true;
+      fetch('/survey/comment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})})
+        .then(function(r){return r.json();}).then(function(j){
+          if(j.ok){ document.getElementById('cmt').style.display='none'; go.style.display='none';
+            var m=document.getElementById('cmtmsg'); if(m) m.style.display='block'; }
+          else go.disabled=false;
+        }).catch(function(){ go.disabled=false; });
+    });
+  });
 })();
 """
 
@@ -1445,6 +1551,61 @@ async def survey_vote(req: Request):
     return resp
 
 
+@app.post("/survey/comment")
+async def survey_comment(req: Request):
+    try:
+        data = await req.json()
+    except Exception:
+        return JSONResponse({"ok": False}, status_code=400)
+    text = (data.get("text") or "").strip()[:500]
+    if not text:
+        return JSONResponse({"ok": False}, status_code=400)
+    con = _con()
+    try:
+        con.execute("INSERT INTO survey_comments(ts,text) VALUES(?,?)",
+                    (datetime.now(KST).isoformat(), text))
+        con.commit()
+    except Exception:
+        pass
+    finally:
+        con.close()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/survey-admin", response_class=HTMLResponse)
+def survey_admin():
+    parts = ["<header class='mast'><p class='eyebrow'>Survey Dashboard</p>"
+             "<h1 class='title'>설문 응답 대시보드</h1>"
+             "<p class='sub'>공개 설문(/survey)에 모인 응답 통계와 자유 의견입니다. 콘텐츠 기획 근거로 쓰세요.</p></header>"]
+    for s in SURVEYS:
+        tally = _survey_tally(s["id"])
+        total = sum(tally.values())
+        parts.append(f"<section class='brief-sec'><h2 class='sec-h'><span class='sec-ic'>🗳️</span>{html.escape(s['q'])} "
+                     f"<span class='muted'>· {total:,}명</span></h2>")
+        if total:
+            for opt in s["options"]:
+                cnt = tally.get(opt, 0)
+                pct = (cnt / total * 100) if total else 0
+                parts.append(
+                    f"<div class='wprow'><span class='wpname'>{html.escape(opt)}</span>"
+                    f"<span class='wchg'>{pct:.0f}% <span class='muted'>({cnt:,})</span></span></div>")
+        else:
+            parts.append("<p class='sub'>아직 응답이 없습니다.</p>")
+        parts.append("</section>")
+    comments = _rows("SELECT ts, text FROM survey_comments ORDER BY id DESC LIMIT 200")
+    parts.append(f"<section class='brief-sec'><h2 class='sec-h'><span class='sec-ic'>💬</span>자유 의견 "
+                 f"<span class='muted'>· {len(comments)}건</span></h2>")
+    if comments:
+        for ts, text in comments:
+            parts.append(f"<div class='cmtrow'><div class='cmttext'>{html.escape(text)}</div>"
+                         f"<div class='cmtts'>{html.escape(fmt_time(ts))}</div></div>")
+    else:
+        parts.append("<p class='sub'>아직 의견이 없습니다.</p>")
+    parts.append("</section>")
+    parts.append(FOOT)
+    return page("설문 응답 대시보드", "".join(parts), active="/")
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     inner = (
@@ -1466,14 +1627,12 @@ def home():
         "<a class='tile' href='/data'><div class='tic'>📊</div>"
         "<h3>시황 데이터</h3><p>집중 상품의 최근 흐름을 공개 데이터 기반 그래프로 봅니다.</p></a>"
         "</div>"
-        "<div class='dsectitle'>대중용 공개 도구 <span class='muted'>(비밀번호 없이 열림 · 외부 공유용)</span></div>"
+        "<div class='dsectitle'>대중용 공개 도구 <span class='muted'>(비밀번호 없이 열림 · 외부 공유용 · 별도 페이지)</span></div>"
         "<div class='cards'>"
-        "<a class='tile' href='/dividend'><div class='tic'>💰</div>"
-        "<h3>월 배당 계산기</h3><p>얼마 넣으면 매달 얼마? 상품명 없이 즉석 계산. 공유 링크: /dividend</p></a>"
-        "<a class='tile' href='/learn'><div class='tic'>💡</div>"
-        "<h3>3분 투자 상식</h3><p>연금·투자·경제를 쉽게 풀어주는 지식 카드. 공유 링크: /learn</p></a>"
-        "<a class='tile' href='/survey'><div class='tic'>🗳️</div>"
-        "<h3>투자 설문</h3><p>대중 응답을 모아 콘텐츠 명분·데이터로. 공유 링크: /survey</p></a>"
+        "<a class='tile' href='/tools'><div class='tic'>🌐</div>"
+        "<h3>공개 도구 페이지 열기</h3><p>월 배당 계산기·3분 투자 상식·투자 설문을 한 페이지에서. 이 링크(/tools)를 외부에 공유하세요.</p></a>"
+        "<a class='tile' href='/survey-admin'><div class='tic'>📥</div>"
+        "<h3>설문 응답 대시보드</h3><p>공개 설문의 응답 통계와 자유 의견을 한눈에 봅니다. (운영자용)</p></a>"
         "</div>"
         "<div class='dsectitle'>컴플라이언스</div>"
         "<div class='cards'>"
