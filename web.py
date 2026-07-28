@@ -42,13 +42,17 @@ WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "KODEX")
 AUTH_TOKEN = hashlib.sha256(("kdx:" + WEB_PASSWORD).encode()).hexdigest()
 AUTH_COOKIE = "kdx_auth"
 GATE_EXEMPT = {"/login", "/login/auth", "/robots.txt", "/logo.svg", "/favicon.svg", "/favicon.ico",
-               "/tools", "/dividend", "/learn", "/survey", "/survey/vote", "/survey/comment"}
+               "/favicon-kodex.svg",
+               "/tools", "/dividend", "/learn", "/survey", "/survey/vote", "/survey/comment",
+               "/quiz", "/calendar"}
 
 _BASE = Path(__file__).parent
 LOGO_PATH = _BASE / "logo_kodex_ko.svg"
-FAVICON_PATH = _BASE / "favicon_kodex.svg"
+FAVICON_PATH = _BASE / "favicon_graph.svg"        # 공개 페이지: 투자 그래프
+FAVICON_KODEX_PATH = _BASE / "favicon_kodex.svg"  # 내부 페이지: KODEX 물방울
 _LOGO_CACHE = None
 _FAVICON_CACHE = None
+_FAVICON_KODEX_CACHE = None
 
 JOBS = {}
 LOCK = threading.Lock()
@@ -877,7 +881,7 @@ def page(title, inner, active="", extra_head=""):
         "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<meta name='robots' content='noindex, nofollow'>"
-        "<meta name='theme-color' content='#0B4EA2'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
+        "<meta name='theme-color' content='#0B4EA2'><link rel='icon' type='image/svg+xml' href='/favicon-kodex.svg'>"
         f"<title>{html.escape(title)}</title>{FONT}<style>{CSS}</style>{extra_head}</head>"
         f"<body>{_nav(active)}<div class='wrap'>{inner}</div></body></html>")
 
@@ -1073,6 +1077,20 @@ def favicon():
                     headers={"Cache-Control": "public, max-age=86400"})
 
 
+@app.get("/favicon-kodex.svg")
+def favicon_kodex():
+    global _FAVICON_KODEX_CACHE
+    if _FAVICON_KODEX_CACHE is None:
+        try:
+            _FAVICON_KODEX_CACHE = FAVICON_KODEX_PATH.read_text(encoding="utf-8")
+        except Exception:
+            _FAVICON_KODEX_CACHE = ""
+    if not _FAVICON_KODEX_CACHE:
+        return Response(status_code=404)
+    return Response(_FAVICON_KODEX_CACHE, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     if _authed(request):
@@ -1102,7 +1120,7 @@ def login_page(request: Request):
     return HTMLResponse(
         "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0B4EA2'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
+        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0B4EA2'><link rel='icon' type='image/svg+xml' href='/favicon-kodex.svg'>"
         f"<title>로그인 · KODEX 시황</title>{FONT}<style>{CSS}</style>{js}</head>"
         f"<body>{body}</body></html>")
 
@@ -1150,7 +1168,7 @@ body{font-family:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-s
 .h2{font-weight:300;font-size:clamp(24px,5.6vw,35px);line-height:1.2;letter-spacing:-.2px;margin:0 0 6px}
 .lead{font-size:16.5px;line-height:1.62;margin:16px 0 0}
 .dark .lead{color:var(--bodydark)} .band:not(.dark):not(.blue) .lead{color:var(--body)}
-.scrollcue{margin-top:30px;font-size:13px;color:var(--mutedark);letter-spacing:.05em}
+.scrollcue{margin-top:30px;font-size:13px;color:#8A90A0;letter-spacing:.05em}
 .pill{display:inline-flex;align-items:center;justify-content:center;border:none;border-radius:9999px;font-weight:700;font-size:16px;letter-spacing:.3px;padding:15px 30px;cursor:pointer;background:var(--blue);color:#fff;text-decoration:none}
 .pill:active{background:var(--bluep)}
 .pill.ghost{background:transparent;border:1px solid rgba(255,255,255,.4);color:#fff}
@@ -1233,6 +1251,13 @@ DIVIDEND_JS = """
     ['max','us','stable'].forEach(function(k){var b=$('th_'+k);if(b)b.addEventListener('click',function(){setTheme(k);});});
     document.querySelectorAll('.quick button').forEach(function(b){
       b.addEventListener('click',function(){$('amt').value=parseInt(b.getAttribute('data-v')).toLocaleString();calc();});});
+    var sb=$('shareBtn');
+    if(sb){sb.addEventListener('click',function(){
+      var t=$('rb')?$('rb').textContent:''; var txt='내 돈으로 '+t+' 배당? 나도 계산해봤어요';
+      var url=location.origin+location.pathname;
+      if(navigator.share){navigator.share({title:'월 배당 계산기',text:txt,url:url});}
+      else if(navigator.clipboard){navigator.clipboard.writeText(url);sb.textContent='링크가 복사됐어요';}
+    });}
     setTheme('max');
   });
 })();
@@ -1245,7 +1270,7 @@ def dividend_tool():
         return (f"<button class='theme' id='th_{k}'><div class='tn'>{label}</div>"
                 f"<div class='td'>{desc}</div></button>")
     body = (
-        "<section class='band dark'><div class='inner'>"
+        "<section class='band soft'><div class='inner'>"
         "<p class='eyebrow'>월 배당 만들기</p>"
         "<h1 class='h1'>매달 들어오는 돈,<br>얼마면 만들 수 있을까?</h1>"
         "<p class='lead'>목표 금액을 넣으면, 실제 KODEX 월배당 ETF로 짠 예시 포트폴리오와 "
@@ -1269,6 +1294,7 @@ def dividend_tool():
         "<div class='rb' id='rb'>월 0원</div><div class='rs' id='rs'></div></div>"
         "<div class='field'><label>이 스타일의 예시 포트폴리오 (KODEX)</label>"
         "<div class='pcards' id='pcards'></div></div>"
+        "<div style='margin-top:18px'><button class='pill' id='shareBtn' style='width:100%'>계산 결과 공유하기</button></div>"
         "</div></section>"
 
         "<section class='band blue'><div class='inner'>"
@@ -1305,41 +1331,68 @@ def dividend_tool():
 
 # ---------- 공개 도구 공용 레이아웃 (지식·설문) ----------
 PUBLIC_CSS = """
-*{box-sizing:border-box} :root{--bg:#0E1730;--card:#17213C;--line:#2A375A;--ink:#EAF0FF;--sub:#9FB0D6;--accent:#4C8DFF;--accent2:#8AB4FF;--good:#37D39B}
-html,body{margin:0} body{font-family:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;background:radial-gradient(1200px 600px at 50% -10%,#1b2a52 0,#0E1730 60%),#0E1730;color:var(--ink);min-height:100vh}
-.wrap{max-width:560px;margin:0 auto;padding:28px 18px 60px}
-.hero{text-align:center;padding:10px 0 6px}
-.hero h1{font-size:25px;font-weight:800;letter-spacing:-.02em;margin:0 0 8px}
-.hero p{color:var(--sub);font-size:14px;line-height:1.6;margin:0}
-.qcard{background:var(--card);border:1px solid var(--line);border-radius:14px;margin:10px 0;overflow:hidden}
-.qcard summary{list-style:none;cursor:pointer;padding:16px 18px;font-weight:700;font-size:15px;display:flex;justify-content:space-between;gap:10px}
+*{box-sizing:border-box}
+:root{--bg:#ffffff;--soft:#F4F6FB;--card:#ffffff;--line:#E9ECF3;--ink:#0A0A0B;--body:rgba(0,0,0,.62);--sub:#6B6B6B;--mute:#8A90A0;--accent:#1454FF;--accent2:#1454FF;--bluep:#0F3FCC;--good:#0F9D58}
+html,body{margin:0}
+body{font-family:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;-webkit-font-smoothing:antialiased}
+.wrap{max-width:600px;margin:0 auto;padding:40px 20px 64px}
+.hero{text-align:center;padding:14px 0 12px}
+.hero h1{font-size:clamp(28px,7vw,44px);font-weight:300;letter-spacing:-.5px;line-height:1.18;margin:0 0 12px}
+.hero p{color:var(--body);font-size:15.5px;line-height:1.6;margin:0}
+.qcard{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:10px 0;overflow:hidden}
+.qcard summary{list-style:none;cursor:pointer;padding:17px 18px;font-weight:600;font-size:15.5px;display:flex;justify-content:space-between;gap:10px;color:var(--ink)}
 .qcard summary::-webkit-details-marker{display:none}
-.qcard summary .arw{color:var(--accent2);transition:.2s}
+.qcard summary .arw{color:var(--accent);font-weight:700;transition:.2s}
 .qcard[open] summary .arw{transform:rotate(90deg)}
-.qcard .ans{padding:0 18px 16px;color:#CBD6F0;font-size:14px;line-height:1.7}
-.cat{font-family:ui-monospace,monospace;font-size:11px;color:var(--accent2);letter-spacing:.05em;margin:22px 0 4px;font-weight:700}
-.sq{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin:12px 0}
-.sq h3{font-size:16px;margin:0 0 14px;font-weight:800}
-.sq .opt{display:block;width:100%;text-align:left;padding:13px 15px;margin:8px 0;border:1px solid var(--line);border-radius:11px;background:#0F1830;color:var(--ink);font-size:14.5px;font-weight:600;cursor:pointer;transition:.12s}
+.qcard .ans{padding:0 18px 17px;color:var(--body);font-size:14.5px;line-height:1.7}
+.cat{font-family:ui-monospace,monospace;font-size:11px;color:var(--accent);letter-spacing:.08em;margin:26px 0 6px;font-weight:700;text-transform:uppercase}
+.badge-new{display:inline-block;background:var(--accent);color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:9999px;margin-left:6px;vertical-align:middle}
+.sq{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin:12px 0}
+.sq h3{font-size:16.5px;margin:0 0 14px;font-weight:700;line-height:1.4}
+.sq .opt{display:block;width:100%;text-align:left;padding:14px 16px;margin:8px 0;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);font-size:14.5px;font-weight:600;cursor:pointer;transition:.12s}
 .sq .opt:hover{border-color:var(--accent)}
-.sq .bar{margin:8px 0;position:relative;background:#0F1830;border-radius:9px;overflow:hidden;height:38px;border:1px solid var(--line)}
-.sq .bar .fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#2C63C7,#4C8DFF);border-radius:9px;transition:width .5s}
-.sq .bar .txt{position:absolute;left:12px;top:0;bottom:0;display:flex;align-items:center;font-size:13.5px;font-weight:700;z-index:1}
-.sq .bar .pct{position:absolute;right:12px;top:0;bottom:0;display:flex;align-items:center;font-size:13px;font-weight:800;color:var(--accent2);z-index:1}
-.sq .voted{font-size:12px;color:var(--good);margin-top:6px}
-.sq .cmt{width:100%;padding:12px;border:1px solid var(--line);border-radius:11px;background:#0F1830;color:var(--ink);font-size:14.5px;font-family:inherit;resize:vertical;margin-bottom:10px}
+.sq .bar{margin:8px 0;position:relative;background:var(--soft);border-radius:9px;overflow:hidden;height:40px;border:1px solid var(--line)}
+.sq .bar .fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#4C8DFF,#1454FF);border-radius:9px;transition:width .5s}
+.sq .bar .txt{position:absolute;left:13px;top:0;bottom:0;display:flex;align-items:center;font-size:13.5px;font-weight:700;z-index:1;color:var(--ink)}
+.sq .bar .pct{position:absolute;right:13px;top:0;bottom:0;display:flex;align-items:center;font-size:13px;font-weight:800;color:var(--bluep);z-index:1}
+.sq .voted{font-size:12.5px;color:var(--good);margin-top:8px;font-weight:600}
+.sq .cmt{width:100%;padding:13px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);font-size:14.5px;font-family:inherit;resize:vertical;margin-bottom:10px}
 .sq .cmt:focus{outline:none;border-color:var(--accent)}
 .sq .total{font-size:12px;color:var(--sub);margin-top:8px}
-.disc{margin-top:20px;font-size:11.5px;color:#8394BC;line-height:1.7;background:#111a33;border:1px solid var(--line);border-radius:12px;padding:14px}
-.disc b{color:#AFC0E6}
-.foot{text-align:center;color:#6B7BA6;font-size:11px;margin-top:22px}
-.plink{display:inline-block;margin:14px auto 0;color:var(--accent2);font-size:13px;text-decoration:none;font-weight:600}
-.ptiles{display:grid;gap:12px;margin-top:8px}
-.ptile{display:block;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;text-decoration:none;color:var(--ink);transition:.15s}
+.teaser{text-align:center;font-size:14px;color:var(--body);background:var(--soft);border-radius:12px;padding:14px;margin:16px 0}
+.disc{margin-top:22px;font-size:11.5px;color:var(--sub);line-height:1.75;background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:16px}
+.disc b{color:var(--ink)}
+.foot{text-align:center;color:var(--mute);font-size:11px;margin-top:24px}
+.plink{display:inline-block;margin:16px auto 0;color:var(--accent);font-size:14px;text-decoration:none;font-weight:700}
+.ptiles{display:grid;gap:12px;margin-top:10px}
+.ptile{display:block;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;text-decoration:none;color:var(--ink);transition:.15s}
 .ptile:hover{border-color:var(--accent)}
-.pemoji{font-size:30px;margin-bottom:8px}
-.pt-t{font-size:17px;font-weight:800;margin-bottom:4px}
-.pt-d{font-size:13.5px;color:var(--sub);line-height:1.5}
+.pemoji{font-size:30px;margin-bottom:10px}
+.pt-t{font-size:17px;font-weight:700;margin-bottom:5px}
+.pt-d{font-size:13.5px;color:var(--body);line-height:1.5}
+.pill{display:inline-flex;align-items:center;justify-content:center;border:none;border-radius:9999px;font-weight:700;font-size:15px;letter-spacing:.3px;padding:14px 28px;cursor:pointer;background:var(--accent);color:#fff;text-decoration:none}
+.pill:active{background:var(--bluep)}
+.pill.ghost{background:transparent;border:1.5px solid var(--line);color:var(--ink)}
+.qprog{height:6px;background:var(--soft);border-radius:9999px;overflow:hidden;margin-bottom:22px}
+.qprog .pf{height:100%;width:0;background:var(--accent);transition:width .3s;border-radius:9999px}
+.qtitle{font-size:20px;font-weight:700;line-height:1.45;margin:0 0 18px}
+.rtype{text-align:center;padding:8px 0 4px}
+.rtype .em{font-size:54px;line-height:1}
+.rtype .tn{font-size:26px;font-weight:800;margin-top:8px}
+.rtype .td{font-size:15px;color:var(--body);line-height:1.65;margin-top:12px}
+.reco{background:var(--soft);border-radius:14px;padding:18px;margin-top:22px}
+.reco h4{margin:0 0 10px;font-size:14px}
+.share{display:flex;gap:8px;margin-top:20px}
+.share .pill{flex:1}
+.calnote{color:var(--body);font-size:14px;line-height:1.6;margin:0 0 18px;text-align:center}
+.dayblock{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:12px 0}
+.dayhd{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.daynum{font-size:30px;font-weight:800;color:var(--accent);letter-spacing:-1px}
+.daylab{font-size:13px;color:var(--sub);font-weight:600}
+.calitem{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+.calitem .cn{font-size:14px;font-weight:600;overflow-wrap:anywhere}
+.calitem .ct{font-size:11.5px;color:var(--mute);margin-top:2px}
+.calitem .cy{font-family:ui-monospace,monospace;font-weight:800;font-size:14px;color:var(--accent);white-space:nowrap}
 """
 
 
@@ -1363,54 +1416,202 @@ def tools_hub():
         "<div class='hero'><h1>돈 공부, 가볍게 시작하기</h1>"
         "<p>계산해 보고, 알아보고, 다들 어떻게 하는지 살펴보세요.</p></div>"
         "<div class='ptiles'>"
-        + tile("/dividend", "💰", "월 배당 계산기", "얼마 넣으면 매달 얼마? 반대로도 계산해 봐요.")
-        + tile("/learn", "💡", "3분 투자 상식", "연금·투자·경제를 아주 쉽게 하나씩.")
+        + tile("/learn", "💡", "3분 투자 상식", "연금·투자·경제를 아주 쉽게. 매주 새 내용으로 바뀌어요.")
         + tile("/survey", "🗳️", "투자 설문", "다들 어떻게 하고 있는지 살짝 엿보기.")
+        + tile("/quiz", "🧭", "투자 성향 테스트", "6문항으로 내 투자 스타일 알아보기.")
+        + tile("/calendar", "📅", "배당 캘린더", "매달 며칠에 배당이 들어올까?")
+        + tile("/dividend", "💰", "월 배당 계산기", "얼마 넣으면 매달 얼마? 스타일별로 계산.")
         + "</div>"
         "<div class='foot'>교육용 참고 자료 · 투자 권유가 아닙니다.</div>"
         "</div>")
     return public_page("돈 공부 가볍게", body)
 
 
-# 대중용 지식 카드 (연금·투자·경제 기초 · 상품/브랜드/ETF 언급 없음, 교육용)
-LEARN_CARDS = [
-    ("연금 계좌 기초", [
-        ("연금저축과 IRP, 뭐가 달라요?",
-         "둘 다 노후를 위해 세제 혜택을 주는 계좌예요. 연금저축은 누구나 만들 수 있고, IRP(개인형 퇴직연금)는 소득이 있는 사람이 퇴직금까지 넣을 수 있어요. 두 계좌를 합쳐 연간 최대 900만 원까지 세액공제를 받을 수 있습니다."),
-        ("ISA는 뭐예요?",
-         "ISA(개인종합자산관리계좌)는 여러 상품을 한 계좌에서 굴리며 이자·수익에 세금 혜택을 받는 계좌예요. 만기 후 연금 계좌로 옮기면 추가 세제 혜택도 있습니다."),
-        ("세액공제가 정확히 뭐예요?",
-         "낸 세금에서 일정 금액을 직접 깎아주는 걸 말해요. 예를 들어 연금저축·IRP에 넣으면 넣은 금액의 일부(소득에 따라 13.2~16.5%)를 연말정산 때 돌려받습니다."),
+# ---- 투자 성향 테스트 (/quiz) : 결과에 KODEX 스타일 추천 + 공유 ----
+QUIZ_JS = """
+(function(){
+  var Q=[
+   {q:'투자하면 가장 먼저 드는 생각은?',a:[
+     {l:'잃지만 않으면 좋겠다',t:'stable'},{l:'매달 따박따박 들어오면 좋겠다',t:'income'},
+     {l:'크게 불리고 싶다',t:'growth'},{l:'골고루 안전하게 가고 싶다',t:'balanced'}]},
+   {q:'목돈이 생기면 어디에?',a:[
+     {l:'예금 등 안전한 곳',t:'stable'},{l:'배당 주는 곳',t:'income'},
+     {l:'성장·기술주',t:'growth'},{l:'이것저것 나눠서',t:'balanced'}]},
+   {q:'내 계좌가 -10% 됐다. 내 마음은?',a:[
+     {l:'밤에 잠이 안 온다',t:'stable'},{l:'배당 들어오면 버틸 만하다',t:'income'},
+     {l:'기회다, 더 산다',t:'growth'},{l:'분산했으니 괜찮다',t:'balanced'}]},
+   {q:'투자로 가장 원하는 것은?',a:[
+     {l:'원금 지키기',t:'stable'},{l:'매달 현금흐름',t:'income'},
+     {l:'자산 크게 불리기',t:'growth'},{l:'균형과 안정',t:'balanced'}]},
+   {q:'생각하는 투자 기간은?',a:[
+     {l:'짧게, 안전하게',t:'stable'},{l:'길게, 계속 받으면서',t:'income'},
+     {l:'길게, 크게',t:'growth'},{l:'상황 따라 유연하게',t:'balanced'}]},
+   {q:'가장 끌리는 말은?',a:[
+     {l:'안정적인',t:'stable'},{l:'월 배당',t:'income'},
+     {l:'미국 성장·AI',t:'growth'},{l:'분산·리밸런싱',t:'balanced'}]}
+  ];
+  var T={
+   stable:{em:'🛡️',n:'안정 지킴이',d:'변동성보다 마음 편함이 더 중요한 타입이에요. 급등락보다 꾸준함을 좋아하죠.',
+     recs:[{n:'KODEX 미국30년국채타겟커버드콜(합성 H)',y:12.4},{n:'KODEX 한국부동산리츠인프라',y:8.2}]},
+   income:{em:'💵',n:'월급 같은 배당러',d:'매달 들어오는 현금흐름을 사랑하는 타입. 통장에 따박따박 꽂히는 맛이죠.',
+     recs:[{n:'KODEX 200타겟위클리커버드콜',y:18.6},{n:'KODEX 금융고배당TOP10타겟위클리커버드콜',y:15.8}]},
+   growth:{em:'🚀',n:'성장 추구러',d:'길게 크게 불리고 싶은 타입. 오늘의 변동성은 내일의 기회라고 보죠.',
+     recs:[{n:'KODEX 미국AI테크TOP10타겟커버드콜',y:15.5},{n:'KODEX 미국S&P500데일리커버드콜OTM',y:15.3}]},
+   balanced:{em:'⚖️',n:'균형 잡이',d:'한쪽에 몰지 않고 골고루 나누는 타입. 주식·채권·리츠를 두루 담죠.',
+     recs:[{n:'KODEX 200타겟위클리커버드콜',y:18.6},{n:'KODEX 미국30년국채타겟커버드콜(합성 H)',y:12.4}]}
+  };
+  var idx=0, score={stable:0,income:0,growth:0,balanced:0};
+  var root;
+  function esc(s){return (s||'').replace(/[&<>\"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c];});}
+  function q(){
+    var item=Q[idx], pct=Math.round(idx/Q.length*100);
+    var h="<div class='qprog'><div class='pf' style='width:"+pct+"%'></div></div>";
+    h+="<div class='qtitle'>Q"+(idx+1)+". "+esc(item.q)+"</div>";
+    item.a.forEach(function(o,i){ h+="<button class='opt' data-t='"+o.t+"'>"+esc(o.l)+"</button>"; });
+    root.innerHTML=h;
+    root.querySelectorAll('.opt').forEach(function(b){
+      b.addEventListener('click',function(){ score[b.getAttribute('data-t')]++; idx++;
+        if(idx>=Q.length) result(); else q(); });
+    });
+  }
+  function topType(){var best='balanced',mx=-1;for(var k in score){if(score[k]>mx){mx=score[k];best=k;}}return best;}
+  function result(ty){
+    ty=ty||topType(); var t=T[ty];
+    var recs=t.recs.map(function(r){return "<div class='calitem'><div><div class='cn'>"+esc(r.n)+"</div></div><div class='cy'>연 "+r.y+"%</div></div>";}).join('');
+    var url=location.origin+location.pathname+'?t='+ty;
+    var h="<div class='rtype'><div class='em'>"+t.em+"</div><div class='tn'>"+esc(t.n)+"</div><div class='td'>"+esc(t.d)+"</div></div>";
+    h+="<div class='reco'><h4>이런 스타일의 KODEX 월배당 ETF 예시</h4>"+recs+"</div>";
+    h+="<div class='share'><button class='pill' id='shr'>결과 공유하기</button><button class='pill ghost' id='again'>다시 하기</button></div>";
+    h+="<div class='disc'>결과와 예시는 참고용이며 특정 상품 추천·투자 권유가 아닙니다. 분배율은 가정치로 실제와 다를 수 있고, 원금손실이 발생할 수 있습니다. 삼성자산운용 준법감시인 심사필 [확인 필요].</div>";
+    root.innerHTML=h;
+    document.getElementById('again').addEventListener('click',function(){idx=0;score={stable:0,income:0,growth:0,balanced:0};q();});
+    document.getElementById('shr').addEventListener('click',function(){
+      var txt='나의 투자 성향은 '+t.n+'! 당신은?';
+      if(navigator.share){navigator.share({title:'투자 성향 테스트',text:txt,url:url});}
+      else if(navigator.clipboard){navigator.clipboard.writeText(url);document.getElementById('shr').textContent='링크가 복사됐어요';}
+    });
+  }
+  window.addEventListener('DOMContentLoaded',function(){
+    root=document.getElementById('quizroot');
+    var m=(location.search.match(/[?&]t=(stable|income|growth|balanced)/)||[])[1];
+    if(m) result(m); else q();
+  });
+})();
+"""
+
+
+@app.get("/quiz", response_class=HTMLResponse)
+def quiz_tool():
+    body = ("<div class='wrap'>"
+            "<div class='hero'><h1>나의 투자 성향은?</h1>"
+            "<p>6개 질문으로 알아보는 내 투자 스타일.<br>끝나면 어울리는 KODEX 월배당 예시도 알려드려요.</p></div>"
+            "<div id='quizroot'></div>"
+            "<div class='foot'>교육용 참고 자료 · 투자 권유가 아닙니다</div></div>")
+    return public_page("투자 성향 테스트", body, extra_head=f"<script>{QUIZ_JS}</script>")
+
+
+# ---- 배당 캘린더 (/calendar) : 월배당 KODEX ETF 지급일 모아보기 ----
+DIV_CALENDAR = [
+    (13, [
+        ("KODEX 200타겟위클리커버드콜", "국내주식", 18.6),
+        ("KODEX 미국30년국채타겟커버드콜(합성 H)", "채권", 12.4),
+        ("KODEX 미국배당커버드콜액티브", "해외주식", 9.0),
+        ("KODEX 한국부동산리츠인프라", "부동산", 8.2),
     ]),
-    ("투자 기본 개념", [
-        ("복리가 왜 중요해요?",
-         "번 수익에 다시 수익이 붙는 걸 복리라고 해요. 시간이 길수록 눈덩이처럼 커지기 때문에, 일찍 시작할수록 유리하다고 말하는 이유예요."),
-        ("분산투자가 뭐예요?",
-         "한 곳에 몰아넣지 않고 여러 자산·지역·업종에 나눠 담는 걸 말해요. 하나가 흔들려도 전체 충격을 줄이는 효과가 있습니다."),
-        ("인플레이션이 내 돈에 어떤 영향을 줘요?",
-         "물가가 오르면 같은 돈으로 살 수 있는 게 줄어요. 즉 현금을 그냥 두면 실질 가치가 조금씩 깎이는 셈이라, 이를 방어하려 투자하는 사람이 많습니다."),
-    ]),
-    ("요즘 뜨는 궁금증", [
-        ("GPU랑 CPU, 뭐가 달라요?",
-         "CPU는 복잡한 일을 순서대로 빠르게 처리하는 '만능 일꾼', GPU는 단순한 계산을 동시에 엄청 많이 처리하는 '병렬 일꾼'이에요. AI 학습처럼 같은 계산을 대량으로 돌릴 땐 GPU가 강해서 요즘 수요가 폭발했습니다."),
-        ("요즘 IT 기기가 왜 이렇게 비싸졌어요?",
-         "반도체·메모리 수요가 늘고 환율·부품 값이 오르면서 노트북 같은 IT 기기 가격도 전반적으로 올랐어요. 기술이 좋아진 만큼 값도 오른 부분이 있습니다."),
+    (26, [
+        ("KODEX 미국나스닥100데일리커버드콜OTM", "해외주식", 21.3),
+        ("KODEX 금융고배당TOP10타겟위클리커버드콜", "국내주식", 15.8),
+        ("KODEX 미국AI테크TOP10타겟커버드콜", "해외주식", 15.5),
+        ("KODEX 미국S&P500데일리커버드콜OTM", "해외주식", 15.3),
+        ("KODEX 테슬라커버드콜채권혼합액티브", "자산배분", 15.2),
+        ("KODEX 미국배당다우존스타겟커버드콜", "해외주식", 11.9),
     ]),
 ]
 
 
+@app.get("/calendar", response_class=HTMLResponse)
+def calendar_tool():
+    parts = ["<div class='wrap'>",
+             "<div class='hero'><h1>배당, 매달 언제 들어올까?</h1>"
+             "<p>KODEX 월배당 ETF들이 매달 분배금을 주는 시기를 모아봤어요.</p></div>",
+             "<p class='calnote'>아래 상품들은 매달 정해진 기준일에 분배해요. 통장에 실제로 들어오는 날은 조금 뒤일 수 있어요.</p>"]
+    for day, items in DIV_CALENDAR:
+        rows = "".join(
+            f"<div class='calitem'><div><div class='cn'>{html.escape(n)}</div>"
+            f"<div class='ct'>{html.escape(t)}</div></div>"
+            f"<div class='cy'>연 {y}%</div></div>" for n, t, y in items)
+        parts.append(
+            f"<div class='dayblock'><div class='dayhd'><div class='daynum'>{day}일</div>"
+            f"<div class='daylab'>매달 이맘때 분배 · {len(items)}개</div></div>{rows}</div>")
+    parts.append("<div style='text-align:center'><a class='plink' href='/dividend'>내 금액으로 월 배당 계산해보기 →</a></div>")
+    parts.append("<div class='disc'><b>투자 유의</b> 연분배율은 최근 분배율을 연 환산한 가정치로 실제와 다를 수 있고, "
+                 "분배는 운용결과에 따라 변동·중단될 수 있으며 원금손실이 발생할 수 있습니다. "
+                 "특정 상품 추천·투자 권유가 아닙니다. 삼성자산운용 준법감시인 심사필 제 20XX-XXXX호 [확인 필요].</div>")
+    parts.append("<div class='foot'>ⓒ 삼성자산운용 · 교육용 참고 자료</div></div>")
+    return public_page("배당 캘린더", "".join(parts))
+
+
+# 대중용 지식 카드 풀 (상품/브랜드/ETF 언급 없음, 교육용) — 매주 일부만 노출해 재방문 유도
+LEARN_POOL = [
+    ("연금저축과 IRP, 뭐가 달라요?",
+     "둘 다 노후를 위해 세제 혜택을 주는 계좌예요. 연금저축은 누구나 만들 수 있고, IRP(개인형 퇴직연금)는 소득이 있는 사람이 퇴직금까지 넣을 수 있어요. 두 계좌를 합쳐 연간 최대 900만 원까지 세액공제를 받을 수 있습니다."),
+    ("ISA는 뭐예요?",
+     "ISA(개인종합자산관리계좌)는 여러 상품을 한 계좌에서 굴리며 이자·수익에 세금 혜택을 받는 계좌예요. 만기 후 연금 계좌로 옮기면 추가 세제 혜택도 있습니다."),
+    ("세액공제가 정확히 뭐예요?",
+     "낸 세금에서 일정 금액을 직접 깎아주는 걸 말해요. 예를 들어 연금저축·IRP에 넣으면 넣은 금액의 일부(소득에 따라 13.2~16.5%)를 연말정산 때 돌려받습니다."),
+    ("복리가 왜 중요해요?",
+     "번 수익에 다시 수익이 붙는 걸 복리라고 해요. 시간이 길수록 눈덩이처럼 커지기 때문에, 일찍 시작할수록 유리하다고 말하는 이유예요."),
+    ("분산투자가 뭐예요?",
+     "한 곳에 몰아넣지 않고 여러 자산·지역·업종에 나눠 담는 걸 말해요. 하나가 흔들려도 전체 충격을 줄이는 효과가 있습니다."),
+    ("인플레이션이 내 돈에 어떤 영향을 줘요?",
+     "물가가 오르면 같은 돈으로 살 수 있는 게 줄어요. 즉 현금을 그냥 두면 실질 가치가 조금씩 깎이는 셈이라, 이를 방어하려 투자하는 사람이 많습니다."),
+    ("GPU랑 CPU, 뭐가 달라요?",
+     "CPU는 복잡한 일을 순서대로 빠르게 처리하는 '만능 일꾼', GPU는 단순한 계산을 동시에 엄청 많이 처리하는 '병렬 일꾼'이에요. AI 학습처럼 같은 계산을 대량으로 돌릴 땐 GPU가 강해서 요즘 수요가 폭발했습니다."),
+    ("요즘 IT 기기가 왜 이렇게 비싸졌어요?",
+     "반도체·메모리 수요가 늘고 환율·부품 값이 오르면서 노트북 같은 IT 기기 가격도 전반적으로 올랐어요. 기술이 좋아진 만큼 값도 오른 부분이 있습니다."),
+    ("배당과 분배금, 같은 말이에요?",
+     "비슷하지만 조금 달라요. 주식이 이익을 나눠주면 '배당', 펀드·ETF가 나눠주면 보통 '분배금'이라고 불러요. 매달 주면 '월 분배(월배당)'라고 합니다."),
+    ("커버드콜이 뭐예요? 왜 배당이 높아요?",
+     "주식을 들고 있으면서 '오를 권리'를 남에게 팔아 그 대가(옵션 프리미엄)를 받는 전략이에요. 그 대가로 매달 분배 재원을 만들어 분배율이 높은 편이지만, 크게 오를 때 상승은 일부 포기하게 됩니다."),
+    ("환헤지(H)가 뭐예요?",
+     "해외에 투자할 때 환율 변동을 줄이도록 설계한 걸 '환헤지'라 하고 보통 상품명에 (H)로 표시해요. 환율 등락 영향을 덜 받지만, 헤지 비용이 들 수 있습니다."),
+    ("리츠(REITs)는 뭐예요?",
+     "여러 사람의 돈을 모아 빌딩·물류센터 같은 부동산에 투자하고 임대수익 등을 나눠주는 상품이에요. 소액으로 부동산에 간접 투자하는 방법으로 쓰입니다."),
+    ("적립식 투자가 뭐예요?",
+     "매달 일정액을 꾸준히 나눠 사는 방식이에요. 쌀 때 더 많이, 비쌀 때 덜 사게 되어 평균 매입가를 고르게 만드는 효과(코스트 애버리징)가 있습니다."),
+    ("장기투자가 유리하다는 말, 왜 그래요?",
+     "짧게 보면 오르내림이 크지만, 길게 보면 복리 효과와 시장 성장의 영향이 커지는 경향이 있어요. 그래서 시간을 내 편으로 만들라고들 합니다."),
+    ("변동성이 뭐예요?",
+     "가격이 얼마나 심하게 오르락내리락하는지를 말해요. 변동성이 크면 수익 기회도 크지만 마음 졸일 일도 많아지죠. 성향에 맞게 조절하는 게 중요합니다."),
+    ("TDF는 뭐예요?",
+     "은퇴 시점(Target Date)에 맞춰 주식·채권 비중을 자동으로 조절해 주는 펀드예요. 신경 쓰기 번거로운 사람에게 '알아서 굴려주는' 방식으로 인기입니다."),
+]
+
+
+def _week_learn_cards(n=5):
+    try:
+        wk = datetime.now(KST).isocalendar()[1]
+    except Exception:
+        wk = 0
+    total = len(LEARN_POOL)
+    start = (wk * n) % total
+    return [LEARN_POOL[(start + i) % total] for i in range(min(n, total))]
+
+
 @app.get("/learn", response_class=HTMLResponse)
 def learn_tool():
+    now = datetime.now(KST)
+    cards = _week_learn_cards(5)
     parts = ["<div class='wrap'>",
              "<div class='hero'><h1>3분 투자 상식</h1>"
-             "<p>연금·투자·경제, 어렵게 느껴지던 것들을<br>가볍게 하나씩 풀어드려요.</p></div>"]
-    for cat, cards in LEARN_CARDS:
-        parts.append(f"<div class='cat'>{html.escape(cat)}</div>")
-        for q, a in cards:
-            parts.append(
-                "<details class='qcard'><summary>"
-                f"<span>{html.escape(q)}</span><span class='arw'>›</span></summary>"
-                f"<div class='ans'>{html.escape(a)}</div></details>")
+             "<p>연금·투자·경제, 어렵게 느껴지던 것들을<br>가볍게 하나씩 풀어드려요.</p></div>",
+             f"<div class='cat'>이번 주 상식 · {now.month}월 {now.day}일 기준<span class='badge-new'>매주 업데이트</span></div>"]
+    for q, a in cards:
+        parts.append(
+            "<details class='qcard'><summary>"
+            f"<span>{html.escape(q)}</span><span class='arw'>›</span></summary>"
+            f"<div class='ans'>{html.escape(a)}</div></details>")
+    parts.append("<div class='teaser'>매주 월요일, 새로운 상식으로 바뀌어요. 다음 주에 또 들러주세요 🙂</div>")
     parts.append("<div style='text-align:center'><a class='plink' href='/survey'>내 생각도 남기기 · 투자 설문 →</a></div>")
     parts.append("<div class='disc'><b>참고</b> 이 콘텐츠는 일반적인 개념을 쉽게 설명한 교육용 자료이며, "
                  "특정 상품 추천이나 투자 권유가 아닙니다. 투자 결정은 본인의 판단과 책임입니다.</div>")
@@ -1426,6 +1627,10 @@ SURVEYS = [
      "options": ["10만 원 미만", "10~30만 원", "30~50만 원", "50~100만 원", "100만 원 이상"]},
     {"id": "hesitate", "q": "투자를 망설이는 가장 큰 이유는?",
      "options": ["뭘 사야 할지 몰라서", "손실이 무서워서", "여윳돈이 없어서", "시간이 없어서", "이미 잘하고 있어서"]},
+    {"id": "goal", "q": "지금 투자하는 가장 큰 목표는 무엇인가요?",
+     "options": ["노후 준비", "매달 나오는 현금흐름", "목돈 마련", "내 집 마련", "그냥 재미로"]},
+    {"id": "dividend_want", "q": "매달 배당으로 받고 싶은 금액은?",
+     "options": ["월 30만 원", "월 50만 원", "월 100만 원", "월 200만 원", "월 300만 원 이상"]},
 ]
 
 
@@ -1442,8 +1647,9 @@ def _voted_set(request):
 def survey_tool(request: Request):
     voted = _voted_set(request)
     parts = ["<div class='wrap'>",
-             "<div class='hero'><h1>이런 거 궁금하지 않아요?</h1>"
-             "<p>다들 어떻게 하고 있는지, 살짝 엿보기.<br>탭하면 바로 결과가 보여요.</p></div>"]
+             "<div class='hero'><h1>다른 사람들은<br>어떻게 투자할까?</h1>"
+             "<p>다른 사람은 어떻게 생각하는지 궁금하지 않으세요?<br>한 번 탭하면 바로 모두의 응답이 보여요.</p></div>",
+             "<div class='teaser'>💬 지금까지 많은 분이 참여했어요. 당신의 한 표도 통계에 더해집니다.</div>"]
     for s in SURVEYS:
         qid = s["id"]
         parts.append(f"<div class='sq' data-qid='{qid}'><h3>{html.escape(s['q'])}</h3>")
