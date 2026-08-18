@@ -41,10 +41,18 @@ WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "KODEX")
 AUTH_TOKEN = hashlib.sha256(("kdx:" + WEB_PASSWORD).encode()).hexdigest()
 AUTH_COOKIE = "kdx_auth"
-GATE_EXEMPT = {"/login", "/login/auth", "/robots.txt", "/logo.svg", "/favicon.svg", "/favicon.ico",
-               "/favicon-kodex.svg",
+GATE_EXEMPT = {"/login", "/login/auth", "/robots.txt", "/sitemap.xml",
+               "/logo.svg", "/favicon.svg", "/favicon.ico", "/favicon-kodex.svg",
                "/tools", "/dividend", "/learn", "/survey", "/survey/vote", "/survey/comment",
-               "/quiz", "/calendar"}
+               "/quiz", "/calendar", "/cards"}
+
+# 검색엔진에 수집을 허용할 대중용 경로. 내부 페이지(/archive, /plan, /check ...)는 계속 차단한다.
+PUBLIC_PATHS = ["/cards", "/tools", "/dividend", "/learn", "/survey", "/quiz", "/calendar"]
+
+_PS = getattr(settings, "PUBLIC_SITE", {}) or {}
+SITE_URL = (os.environ.get("SITE_URL") or _PS.get("site_url") or "").rstrip("/")
+SITE_BRAND = _PS.get("brand") or "KODEX 시황"
+ALLOW_SEARCH = bool(_PS.get("allow_search", True))
 
 _BASE = Path(__file__).parent
 LOGO_PATH = _BASE / "logo_kodex_ko.svg"
@@ -866,7 +874,7 @@ FONT = ('<link rel="stylesheet" '
 def _nav(active):
     items = [("/", "홈"), ("/bot", "텔레그램 봇"), ("/archive", "아카이브"),
              ("/plan", "제작 브리프"), ("/check", "컴플 체크"), ("/report", "주간 리포트"),
-             ("/data", "데이터")]
+             ("/data", "데이터"), ("/cards", "시황 카드")]
     links = "".join(
         f"<a href='{href}' class='{'on' if active == href else ''}'>{html.escape(label)}</a>"
         for href, label in items)
@@ -1031,7 +1039,34 @@ document.addEventListener('DOMContentLoaded', function(){
 # ================= 라우트 =================
 @app.get("/robots.txt", response_class=PlainTextResponse)
 def robots():
-    return "User-agent: *\nDisallow: /\n"
+    """
+    대중용 공개 도구 경로만 검색 수집을 허용하고, 내부 업무 페이지는 전면 차단한다.
+    (검색엔진은 가장 구체적인 규칙을 우선하므로 Allow 가 Disallow: / 를 이긴다)
+    """
+    if not ALLOW_SEARCH:
+        return "User-agent: *\nDisallow: /\n"
+    lines = ["User-agent: *"]
+    lines += [f"Allow: {p}" for p in PUBLIC_PATHS]
+    lines.append("Disallow: /")
+    if SITE_URL:
+        lines.append(f"Sitemap: {SITE_URL}/sitemap.xml")
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/sitemap.xml")
+def sitemap():
+    """검색엔진에 공개 페이지 목록을 알려준다."""
+    if not (ALLOW_SEARCH and SITE_URL):
+        return Response(status_code=404)
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    urls = "".join(
+        f"<url><loc>{SITE_URL}{p}</loc><lastmod>{today}</lastmod>"
+        f"<changefreq>{'daily' if p == '/cards' else 'weekly'}</changefreq></url>"
+        for p in PUBLIC_PATHS)
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+           '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+           f"{urls}</urlset>")
+    return Response(xml, media_type="application/xml")
 
 
 # ---------- 접근 게이트 (비밀번호) ----------
@@ -1039,10 +1074,17 @@ def _authed(request):
     return request.cookies.get(AUTH_COOKIE) == AUTH_TOKEN
 
 
+def _is_public_path(path):
+    """대중용 경로인지. /cards/12 처럼 하위 경로도 통과시켜야 하므로 접두사까지 본다."""
+    if path in GATE_EXEMPT:
+        return True
+    return any(path == p or path.startswith(p + "/") for p in PUBLIC_PATHS)
+
+
 @app.middleware("http")
 async def _gate(request: Request, call_next):
     path = request.url.path
-    if path in GATE_EXEMPT or _authed(request):
+    if _is_public_path(path) or _authed(request):
         return await call_next(request)
     nxt = path + (("?" + request.url.query) if request.url.query else "")
     return RedirectResponse("/login?next=" + quote(nxt, safe=""), status_code=302)
@@ -1324,9 +1366,15 @@ def dividend_tool():
     return HTMLResponse(
         "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0A0A0B'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
-        f"<title>월 배당 계산기</title>{FONT}<style>{DIVIDEND_CSS}</style>"
-        f"<script>{DIVIDEND_JS}</script></head><body>{body}</body></html>")
+        f"<meta name='robots' content='{'index, follow' if ALLOW_SEARCH else 'noindex, nofollow'}'>"
+        "<meta name='description' content='매달 배당으로 얼마를 받을 수 있을까? 투자금과 스타일을 넣으면 월 배당 예상액을 바로 계산해 줍니다.'>"
+        + (f"<link rel='canonical' href='{SITE_URL}/dividend'>" if SITE_URL else "")
+        + "<meta property='og:title' content='월 배당 계산기 — 매달 얼마 받을 수 있을까'>"
+        "<meta property='og:description' content='투자금을 넣으면 월 배당 예상액을 바로 계산.'>"
+        "<meta name='theme-color' content='#0A0A0B'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
+        f"<title>월 배당 계산기 — 매달 얼마 받을 수 있을까 · {SITE_BRAND}</title>{FONT}"
+        f"<style>{DIVIDEND_CSS}{BANNER_CSS}</style>"
+        f"<script>{DIVIDEND_JS}</script></head><body>{body}{banner_html()}</body></html>")
 
 
 # ---------- 공개 도구 공용 레이아웃 (지식·설문) ----------
@@ -1396,13 +1444,285 @@ body{font-family:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-s
 """
 
 
-def public_page(title, body, extra_head=""):
+# ---------- 시황 카드 페이지 스타일 ----------
+CARDS_CSS = """
+.chero{padding:8px 0 18px}
+.chero .cdate{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.08em;color:#1454FF;font-weight:700}
+.chero h1{font-size:clamp(24px,6.4vw,34px);font-weight:300;letter-spacing:-.5px;line-height:1.2;margin:8px 0 0}
+.kbig{background:#0A0A0B;color:#fff;border-radius:18px;padding:24px 22px;margin:6px 0 14px}
+.kbig .klab{font-size:12px;color:rgba(255,255,255,.55);letter-spacing:.04em}
+.kbig .knum{font-size:clamp(30px,9vw,44px);font-weight:800;letter-spacing:-1.5px;line-height:1.1;margin-top:6px;
+  font-variant-numeric:tabular-nums}
+.kbig .kchg{font-size:16px;font-weight:700;margin-top:6px;font-variant-numeric:tabular-nums}
+.kbig .kchg.up{color:#FF6B7A} .kbig .kchg.down{color:#7FB0FF} .kbig .kchg.flat{color:rgba(255,255,255,.7)}
+.ccard{background:#fff;border:1px solid var(--line);border-radius:16px;padding:20px;margin:12px 0}
+.ccard .chd{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#1454FF;margin-bottom:10px}
+.ccard .chd .cem{font-size:15px}
+.ccard ul{margin:0;padding-left:17px}
+.ccard li{font-size:15px;line-height:1.72;color:#151821;margin:6px 0;overflow-wrap:anywhere}
+.ccard.risk{background:#FFF8F8;border-color:#F3D9DC}
+.ccard.risk .chd{color:#C0303E}
+.cempty{text-align:center;color:#8A90A0;font-size:14px;background:var(--soft);border-radius:14px;padding:34px 18px;margin:12px 0}
+.cnav{display:flex;gap:8px;margin:18px 0 0}
+.cnav a{flex:1;text-align:center;font-size:13.5px;font-weight:600;color:var(--ink);background:#fff;
+  border:1px solid var(--line);border-radius:10px;padding:12px 8px;text-decoration:none}
+.cnav a:hover{border-color:var(--accent);color:var(--accent)}
+.clist{display:grid;gap:8px;margin-top:12px}
+.crow{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--line);border-radius:12px;
+  padding:14px 16px;text-decoration:none;color:var(--ink)}
+.crow:hover{border-color:var(--accent)}
+.crow .cd{font-family:ui-monospace,monospace;font-size:12.5px;color:var(--sub);white-space:nowrap}
+.crow .ck{font-size:11px;font-weight:700;padding:2px 8px;border-radius:9999px;background:var(--soft);color:var(--sub)}
+.crow .ck.am{background:#FBEEDD;color:#B45309} .crow .ck.pm{background:#E7EEF8;color:#0B4EA2}
+.crow .cx{margin-left:auto;font-size:13px;font-weight:700;color:var(--accent)}
+.intbox{background:#FFFBEB;border:1px solid #F5E4B8;border-radius:12px;padding:14px 16px;margin:14px 0;
+  font-size:12.5px;color:#7A5A12;line-height:1.7}
+.intbox b{display:block;margin-bottom:4px;font-size:12px}
+"""
+
+
+# ---------- 하단 배너 영역 (KODEX 배너 삽입 자리) ----------
+BANNER_CSS = """
+.adslot{max-width:600px;margin:26px auto 0;padding:0 20px}
+.adslot .adlab{font-family:ui-monospace,monospace;font-size:10px;letter-spacing:.1em;color:#9AA0AD;margin-bottom:6px}
+.adslot a,.adslot .adbox{display:block;border-radius:14px;overflow:hidden}
+.adslot img{display:block;width:100%;height:auto}
+.adslot .adph{border:1.5px dashed #D4D9E4;border-radius:14px;background:#F7F9FC;color:#8A90A0;
+  text-align:center;padding:30px 16px;font-size:13px;line-height:1.6}
+.adslot .adcap{font-size:11px;color:#8A90A0;margin-top:8px;line-height:1.6}
+"""
+
+
+def banner_html():
+    """대중용 페이지 하단 배너. 이미지가 없으면 '배너가 들어갈 자리'만 보여준다."""
+    cfg = getattr(settings, "BANNER", {}) or {}
+    if not cfg.get("enabled", False):
+        return ""
+    img = (cfg.get("image_url") or "").strip()
+    link = (cfg.get("link_url") or "").strip()
+    alt = html.escape(cfg.get("alt") or "KODEX")
+    cap = (cfg.get("caption") or "").strip()
+    if img:
+        tag = f"<img src='{html.escape(img)}' alt='{alt}' loading='lazy'>"
+        inner = (f"<a href='{html.escape(link)}' target='_blank' rel='noopener sponsored'>{tag}</a>"
+                 if link else f"<div class='adbox'>{tag}</div>")
+        label = "<div class='adlab'>AD</div>"
+    else:
+        inner = ("<div class='adph'>배너 영역<br>"
+                 "<span style='font-size:12px'>배너 이미지를 등록하면 이 자리에 표시됩니다</span></div>")
+        label = "<div class='adlab'>AD</div>"
+    capline = f"<div class='adcap'>{html.escape(cap)}</div>" if cap else ""
+    return f"<div class='adslot'>{label}{inner}{capline}</div>"
+
+
+def public_page(title, body, extra_head="", desc="", path="", banner=True):
+    """
+    대중용 공개 페이지 껍데기.
+    · 검색 수집 허용(내부 페이지와 달리 noindex 를 걸지 않는다)
+    · 카톡·문자로 링크를 보냈을 때 제목·설명이 보이도록 OG 태그를 넣는다
+    """
+    robots_meta = ("index, follow" if ALLOW_SEARCH else "noindex, nofollow")
+    full_title = f"{title} · {SITE_BRAND}" if title else SITE_BRAND
+    canonical = f"<link rel='canonical' href='{SITE_URL}{path}'>" if (SITE_URL and path) else ""
+    og = (f"<meta property='og:type' content='website'>"
+          f"<meta property='og:title' content='{html.escape(full_title)}'>"
+          f"<meta property='og:description' content='{html.escape(desc)}'>"
+          f"<meta property='og:site_name' content='{html.escape(SITE_BRAND)}'>"
+          + (f"<meta property='og:url' content='{SITE_URL}{path}'>" if (SITE_URL and path) else "")
+          + "<meta name='twitter:card' content='summary'>")
     return HTMLResponse(
         "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<meta name='robots' content='noindex, nofollow'><meta name='theme-color' content='#0E1730'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
-        f"<title>{html.escape(title)}</title>{FONT}<style>{PUBLIC_CSS}</style>{extra_head}"
-        f"<body>{body}</body></html>")
+        f"<meta name='robots' content='{robots_meta}'>"
+        f"<meta name='description' content='{html.escape(desc)}'>"
+        f"{canonical}{og}"
+        "<meta name='theme-color' content='#0E1730'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
+        f"<title>{html.escape(full_title)}</title>{FONT}"
+        f"<style>{PUBLIC_CSS}{BANNER_CSS}{CARDS_CSS}</style>{extra_head}"
+        f"<body>{body}{banner_html() if banner else ''}</body></html>")
+
+
+# =====================================================================
+#  대중용 시황 카드 페이지 (/cards)
+#  텔레그램 브리핑 원문에서 '지수·시장 흐름'만 뽑아 카드로 보여준다.
+#  상품명·종목코드·경쟁사·숏폼 소재는 내부 제작용이므로 공개 페이지에 내보내지 않는다.
+# =====================================================================
+_SEC_EMOJI = "☀🌆📈📉📊🎯🎬🔔🗂🏢🚩🌙🕐💡✅⚠"
+
+# 공개해도 되는 섹션만 화이트리스트로 지정 (이모지 → 화면에 쓸 제목)
+PUBLIC_SECTIONS = [
+    ("📉", "오늘 코스피 마감", ""),
+    ("📈", "한눈에 보는 흐름", ""),
+    ("🌙", "오늘 밤 미국장", ""),
+    ("🚩", "이건 알아두세요", "risk"),
+]
+
+# 상품·브랜드가 섞여 들어오는 것을 막는 2차 안전장치
+_BRAND_RE = re.compile(r"(KODEX|코덱스|TIGER|타이거|RISE|KoAct|히어로즈|ACE\s|SOL\s|PLUS\b)", re.I)
+_CODE_RE = re.compile(r"(?<!\d)\d{6}(?!\d)|(?<![0-9A-Z])\d{4}[A-Z]\d(?![0-9A-Z])")
+
+
+def _clean_head(s):
+    return s.lstrip("️").strip()
+
+
+def parse_briefing_sections(body):
+    """브리핑 원문을 [(이모지, 제목, [본문 줄]), ...] 로 나눈다."""
+    out, cur = [], None
+    for raw in (body or "").split("\n"):
+        s = raw.strip()
+        if not s:
+            continue
+        if s[0] in _SEC_EMOJI:
+            cur = [s[0], _clean_head(s[1:]), []]
+            out.append(cur)
+            continue
+        if cur is not None:
+            cur[2].append(s)
+    return out
+
+
+def _strip_bullet(s):
+    return s.lstrip("·-• ").strip()
+
+
+def _is_public_safe(line):
+    """상품명·종목코드가 들어간 줄은 공개 페이지에서 제외한다."""
+    return not (_BRAND_RE.search(line) or _CODE_RE.search(line))
+
+
+_KOSPI_RE = re.compile(r"코스피\s*([\d,]+\.?\d*)\s*(▲|▼|보합)?\s*([\d,]+\.?\d*)?\s*\(?([+-]?[\d.]+)%?\)?")
+
+
+def _kospi_card(lines):
+    """'코스피 6,977.94  ▲164.60 (+2.42%)' 를 큰 숫자 카드로."""
+    text = " ".join(lines)
+    m = _KOSPI_RE.search(text)
+    if not m:
+        return ""
+    close, sign, chg, rate = m.group(1), m.group(2) or "", m.group(3), m.group(4)
+    cls = "up" if sign == "▲" else ("down" if sign == "▼" else "flat")
+    bits = []
+    if sign and chg:
+        bits.append(f"{sign}{chg}")
+    if rate:
+        try:
+            bits.append(f"({float(rate):+.2f}%)")
+        except Exception:
+            pass
+    chgline = f"<div class='kchg {cls}'>{html.escape(' '.join(bits))}</div>" if bits else ""
+    return ("<div class='kbig'><div class='klab'>코스피 종가</div>"
+            f"<div class='knum'>{html.escape(close)}</div>{chgline}</div>")
+
+
+def _bullet_card(emoji, title, lines, extra_cls=""):
+    items = [_strip_bullet(l) for l in lines]
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    lis = "".join(f"<li>{html.escape(i)}</li>" for i in items)
+    cls = ("ccard " + extra_cls).strip()
+    return (f"<div class='{cls}'><div class='chd'><span class='cem'>{emoji}</span>"
+            f"{html.escape(title)}</div><ul>{lis}</ul></div>")
+
+
+def build_public_cards(body):
+    """(카드 HTML, 걸러낸 줄 목록) 을 돌려준다."""
+    sections = {e: (t, lines) for e, t, lines in
+                [(s[0], s[1], s[2]) for s in parse_briefing_sections(body)]}
+    parts, dropped = [], []
+    for emoji, title, cls in PUBLIC_SECTIONS:
+        if emoji not in sections:
+            continue
+        _, raw_lines = sections[emoji]
+        safe, unsafe = [], []
+        for l in raw_lines:
+            (safe if _is_public_safe(l) else unsafe).append(l)
+        dropped += [f"{emoji} {_strip_bullet(u)}" for u in unsafe]
+        if not safe:
+            continue
+        if emoji == "📉":
+            card = _kospi_card(safe)
+            parts.append(card if card else _bullet_card(emoji, title, safe, cls))
+        else:
+            parts.append(_bullet_card(emoji, title, safe, cls))
+    # 공개하지 않는 섹션(소재 후보·상품 움직임·업계 동향)도 기록해 둔다
+    for emoji, (title, _l) in sections.items():
+        if emoji in ("🎯", "🔔", "📊", "🗂", "🏢"):
+            dropped.append(f"{emoji} {title} — 섹션 전체 비공개 (내부 제작용)")
+    return "".join(parts), dropped
+
+
+def _cards_rows(limit=14):
+    return _rows("SELECT id, ts, ymd, kind FROM briefings ORDER BY id DESC LIMIT ?", (limit,))
+
+
+CARDS_DESC = ("오늘 코스피 마감과 밤사이 미국 증시 흐름을 한 장으로. "
+              "매일 아침·장 마감 후 자동으로 업데이트됩니다.")
+
+
+def _cards_footer():
+    return ("<div class='disc'>이 페이지는 공개된 시장 정보를 정리한 <b>참고 자료</b>이며 "
+            "특정 상품에 대한 투자 권유가 아닙니다. 지수·수치는 네이버금융·한국거래소 공개 데이터 기준이며 "
+            "오류가 있을 수 있습니다. 투자 판단과 그 결과는 투자자 본인에게 귀속됩니다.</div>"
+            f"<div class='foot'>제작: {html.escape(MAKER)}</div>")
+
+
+@app.get("/cards", response_class=HTMLResponse)
+def cards_latest(request: Request):
+    rows = _cards_rows(1)
+    if not rows:
+        body = ("<div class='wrap'><div class='chero'><h1>오늘의 시황</h1></div>"
+                "<div class='cempty'>아직 올라온 시황이 없습니다.<br>"
+                "평일 오전 9시·오후 3시 45분에 자동으로 올라옵니다.</div>"
+                + _cards_footer() + "</div>")
+        return public_page("오늘의 시황", body, desc=CARDS_DESC, path="/cards")
+    return _render_card(rows[0][0], request)
+
+
+@app.get("/cards/{bid}", response_class=HTMLResponse)
+def cards_detail(bid: int, request: Request):
+    return _render_card(bid, request)
+
+
+def _render_card(bid, request):
+    row = get_briefing(bid)
+    if not row:
+        return RedirectResponse("/cards", status_code=302)
+    _id, ts, ymd, kind, _src, _title, body_text = row
+    cards, dropped = build_public_cards(body_text)
+    label = "장 마감" if kind == "pm" else "아침"
+    when = fmt_date(ymd, ts)
+
+    inner = (f"<div class='chero'><div class='cdate'>{html.escape(when)} · {label}</div>"
+             "<h1>오늘의 시황</h1></div>")
+    inner += cards if cards else (
+        "<div class='cempty'>이번 회차에는 공개할 지수·시장 요약이 없습니다.<br>"
+        "다음 브리핑을 기다려 주세요.</div>")
+
+    # 내부 직원(로그인 상태)에게만 보이는 확인용 박스
+    if dropped and _authed(request):
+        items = "".join(f"· {html.escape(d)}<br>" for d in dropped[:12])
+        inner += ("<div class='intbox'><b>내부 확인용 (로그인한 사람만 보입니다)</b>"
+                  f"공개 페이지에서 제외된 항목 {len(dropped)}건<br>{items}</div>")
+
+    others = [r for r in _cards_rows(8) if r[0] != bid][:5]
+    if others:
+        links = "".join(
+            f"<a class='crow' href='/cards/{r[0]}'>"
+            f"<span class='ck {r[3]}'>{'마감' if r[3] == 'pm' else '아침'}</span>"
+            f"<span class='cd'>{html.escape(fmt_date(r[2], r[1]))}</span>"
+            "<span class='cx'>보기</span></a>" for r in others)
+        inner += f"<div class='cat' style='margin-top:28px'>지난 시황</div><div class='clist'>{links}</div>"
+
+    inner += ("<div class='cnav'>"
+              "<a href='/tools'>돈 공부 도구</a>"
+              "<a href='/dividend'>월 배당 계산기</a>"
+              "<a href='/survey'>투자 설문</a>"
+              "</div>")
+    inner += _cards_footer()
+    return public_page("오늘의 시황", f"<div class='wrap'>{inner}</div>",
+                       desc=CARDS_DESC, path="/cards")
 
 
 @app.get("/tools", response_class=HTMLResponse)
@@ -1416,6 +1736,7 @@ def tools_hub():
         "<div class='hero'><h1>돈 공부, 가볍게 시작하기</h1>"
         "<p>계산해 보고, 알아보고, 다들 어떻게 하는지 살펴보세요.</p></div>"
         "<div class='ptiles'>"
+        + tile("/cards", "📊", "오늘의 시황", "코스피 마감과 밤사이 미국장을 한 장으로. 매일 자동 업데이트.")
         + tile("/learn", "💡", "3분 투자 상식", "연금·투자·경제를 아주 쉽게. 매주 새 내용으로 바뀌어요.")
         + tile("/survey", "🗳️", "투자 설문", "다들 어떻게 하고 있는지 살짝 엿보기.")
         + tile("/quiz", "🧭", "투자 성향 테스트", "6문항으로 내 투자 스타일 알아보기.")
@@ -1424,7 +1745,8 @@ def tools_hub():
         + "</div>"
         "<div class='foot'>교육용 참고 자료 · 투자 권유가 아닙니다.</div>"
         "</div>")
-    return public_page("돈 공부 가볍게", body)
+    return public_page("돈 공부 가볍게 — 월 배당 계산기·배당 캘린더·투자 성향 테스트", body,
+                       desc="월 배당 계산기, 배당 캘린더, 투자 성향 테스트, 3분 투자 상식까지. 어려운 말 없이 가볍게 보는 돈 공부 도구 모음.", path="/tools")
 
 
 # ---- 투자 성향 테스트 (/quiz) : 결과에 KODEX 스타일 추천 + 공유 ----
@@ -1507,7 +1829,9 @@ def quiz_tool():
             "<p>6개 질문으로 알아보는 내 투자 스타일.<br>끝나면 어울리는 KODEX 월배당 예시도 알려드려요.</p></div>"
             "<div id='quizroot'></div>"
             "<div class='foot'>교육용 참고 자료 · 투자 권유가 아닙니다</div></div>")
-    return public_page("투자 성향 테스트", body, extra_head=f"<script>{QUIZ_JS}</script>")
+    return public_page("투자 성향 테스트 — 6문항으로 내 투자 스타일 알아보기", body,
+                       extra_head=f"<script>{QUIZ_JS}</script>",
+                       desc="6문항 1분. 안정 지킴이·배당러·성장 추구러·균형 잡이 중 내 투자 성향은? 결과는 친구에게 공유할 수 있습니다.", path="/quiz")
 
 
 # ---- 배당 캘린더 (/calendar) : 월배당 KODEX ETF 지급일 모아보기 ----
@@ -1548,7 +1872,8 @@ def calendar_tool():
                  "분배는 운용결과에 따라 변동·중단될 수 있으며 원금손실이 발생할 수 있습니다. "
                  "특정 상품 추천·투자 권유가 아닙니다. 삼성자산운용 준법감시인 심사필 제 20XX-XXXX호 [확인 필요].</div>")
     parts.append("<div class='foot'>ⓒ 삼성자산운용 · 교육용 참고 자료</div></div>")
-    return public_page("배당 캘린더", "".join(parts))
+    return public_page("배당 캘린더 — 매달 며칠에 배당이 들어올까", "".join(parts),
+                       desc="월 배당 ETF의 분배금 지급일을 달력으로. 매달 며칠에 돈이 들어오는지 한눈에 확인하세요.", path="/calendar")
 
 
 # 대중용 지식 카드 풀 (상품/브랜드/ETF 언급 없음, 교육용) — 매주 일부만 노출해 재방문 유도
@@ -1616,7 +1941,8 @@ def learn_tool():
     parts.append("<div class='disc'><b>참고</b> 이 콘텐츠는 일반적인 개념을 쉽게 설명한 교육용 자료이며, "
                  "특정 상품 추천이나 투자 권유가 아닙니다. 투자 결정은 본인의 판단과 책임입니다.</div>")
     parts.append("<div class='foot'>교육용 참고 자료</div></div>")
-    return public_page("3분 투자 상식", "".join(parts))
+    return public_page("3분 투자 상식 — 연금·ETF·배당 쉽게 이해하기", "".join(parts),
+                       desc="연금저축·IRP·ETF·배당·커버드콜을 3분 만에. 매주 새로운 주제로 바뀌는 왕초보 투자 상식.", path="/learn")
 
 
 # 대중용 설문 (회의: '명분' 데이터 장치 · 상품/브랜드 언급 없음)
@@ -1669,7 +1995,9 @@ def survey_tool(request: Request):
     parts.append("<div class='disc'><b>참고</b> 이 설문은 방문자들의 응답을 익명으로 모아 보여주는 참고용 자료입니다. "
                  "투자 권유가 아니며, 특정 상품과 무관합니다.</div>")
     parts.append("<div class='foot'>익명 설문 · 참고용</div></div>")
-    return public_page("투자 설문", "".join(parts), extra_head=f"<script>{SURVEY_JS}</script>")
+    return public_page("투자 설문 — 다들 어떻게 투자하고 있을까", "".join(parts),
+                       extra_head=f"<script>{SURVEY_JS}</script>",
+                       desc="다른 사람들은 어디에, 얼마나, 어떻게 투자하고 있을까? 한 번 누르면 바로 결과를 볼 수 있는 익명 투자 설문.", path="/survey")
 
 
 def _survey_result_html(qid, s):
@@ -2152,7 +2480,9 @@ def brief_detail(bid: int):
              f"<span class='tag'>{html.escape(source_label(source))}</span></div>"
              f"<h1 class='dtitle'>{html.escape(title or '(제목 없음)')}</h1>"
              f"<div class='dmeta'>{html.escape(fmt_date(ymd, ts))} · {html.escape(fmt_time(ts))}</div>"
-             f"<div class='body'>{html.escape(body or '')}</div>" + FOOT)
+             f"<a class='detaillink' href='/cards/{bid}' target='_blank' rel='noopener'>"
+             "이 브리핑을 대중용 시황 카드로 보기 →</a>"
+             f"<div class='body' style='margin-top:12px'>{html.escape(body or '')}</div>" + FOOT)
     return page(title or "브리핑", inner, active="/archive")
 
 
