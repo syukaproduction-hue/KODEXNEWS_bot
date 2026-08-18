@@ -8,6 +8,9 @@ KODEX 시황 뉴스봇
 - /stop : 구독 해지
 - /stats : (운영자 전용) 구독자 수·사용량·추정 비용
 - /chatid : 채팅 ID 확인
+- /holiday : 오늘이 증시 휴장일인지 확인 (자동 발송 여부 진단)
+
+주말·공휴일에는 자동 발송하지 않습니다. 휴장일 목록은 settings.py 의 MARKET_HOLIDAYS.
 설정은 settings.py, 브리핑 방식은 *_prompt.md 에서 수정합니다.
 """
 
@@ -284,9 +287,22 @@ def month_stats():
     return sub, rows
 
 
+# ===================== 휴장일 판정 =====================
+def holiday_name(d=None):
+    """
+    오늘(또는 지정한 날)이 증시 휴장일이면 그 이름('광복절 대체공휴일' 등)을 돌려준다.
+    정상 거래일이면 None. 주말은 목록에 없어도 자동으로 걸러낸다.
+    """
+    d = d or datetime.now(TZ).date()
+    if d.weekday() >= 5:
+        return "주말"
+    table = getattr(settings, "MARKET_HOLIDAYS", {}) or {}
+    return table.get(d.strftime("%Y-%m-%d"))
+
+
 # ===================== 코스피 종가 조회 (네이버금융) =====================
-def fetch_kospi_close():
-    """네이버금융에서 코스피 현재가·등락을 읽어 한 줄 문장으로 반환. 실패하면 None."""
+def _kospi_realtime():
+    """네이버금융 실시간 코스피. {'close','change','rate'} 또는 None. (날짜 정보가 없다)"""
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
     endpoints = [
         "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI",
@@ -303,27 +319,98 @@ def fetch_kospi_close():
             if isinstance(data, dict) and "datas" in data:
                 node = data["datas"][0]
             close = (node.get("closePrice") or node.get("nv") or node.get("now"))
-            change = (node.get("compareToPreviousClosePrice") or node.get("cv"))
-            rate = (node.get("fluctuationsRatio") or node.get("cr"))
-            sign = node.get("compareToPreviousPrice")
-            if isinstance(sign, dict):
-                sign = sign.get("text", "")
             if not close:
                 continue
-            close_s = str(close).replace(",", "")
-            change_s = str(change).replace(",", "") if change is not None else ""
-            arrow = ""
-            try:
-                cv = float(change_s)
-                arrow = "▲" if cv > 0 else ("▼" if cv < 0 else "보합")
-                change_s = f"{abs(cv):,.2f}"
-            except Exception:
-                pass
-            rate_s = f" ({rate}%)" if rate not in (None, "") else ""
-            return f"코스피 {float(close_s):,.2f} {arrow}{change_s}{rate_s} (출처: 네이버금융, 한국거래소 기준)"
+            out = {"close": float(str(close).replace(",", "")), "change": None, "rate": None}
+            change = (node.get("compareToPreviousClosePrice") or node.get("cv"))
+            if change is not None:
+                try:
+                    out["change"] = float(str(change).replace(",", ""))
+                except Exception:
+                    pass
+            rate = (node.get("fluctuationsRatio") or node.get("cr"))
+            if rate not in (None, ""):
+                try:
+                    out["rate"] = float(str(rate).replace("%", "").replace(",", ""))
+                except Exception:
+                    pass
+            return out
         except Exception:
             continue
     return None
+
+
+def _kospi_line(close, change, rate):
+    """텔레그램에 그대로 나갈 한 줄. 예) 코스피 6,977.94  ▲164.60 (+2.42%)"""
+    try:
+        close_f = float(close)
+    except Exception:
+        return None
+    line = f"코스피 {close_f:,.2f}"
+    if change is not None:
+        try:
+            cv = float(change)
+            arrow = "▲" if cv > 0 else ("▼" if cv < 0 else "보합")
+            tail = ""
+            if rate not in (None, ""):
+                try:
+                    tail = f" ({float(rate):+.2f}%)"
+                except Exception:
+                    tail = ""
+            line += f"  {arrow}{abs(cv):,.2f}{tail}"
+        except Exception:
+            pass
+    return line
+
+
+def kospi_today():
+    """
+    오늘 코스피 마감을 (표시할 한 줄, 상태) 로 돌려준다.
+    상태  ok      = 오늘 거래일 확정 데이터를 확보했다
+          closed  = 오늘 장이 열리지 않았다고 판단했다 (마감 수치를 쓰면 안 된다)
+          unknown = 조회 자체가 안 됐다 (네트워크 문제 등 — 마감 항목만 빼고 진행)
+
+    휴장일에 직전 거래일 종가가 '오늘 마감'으로 나가는 사고를 막는 안전장치다.
+    (2026-08-17 광복절 대체공휴일에 실제로 발생했던 문제)
+    1) 일별 시세에서 '오늘 날짜' 행을 찾으면 그 값을 쓴다 — 날짜가 확인된 가장 믿을 수 있는 값.
+    2) 오늘 행이 없으면 실시간값을 보되, 그 값이 직전 거래일 종가와 똑같으면
+       장이 열리지 않은 것으로 보고 closed 로 판단한다.
+    """
+    today = datetime.now(TZ).strftime("%Y%m%d")
+    try:
+        rows = market_data.index_daily_series("KOSPI", 6) or []
+    except Exception:
+        log.exception("코스피 일별 시세 조회 실패")
+        rows = []
+    dated = {r.get("ymd"): r for r in rows if r.get("ymd")}
+
+    row = dated.get(today)
+    if row:
+        prev = next((r for r in reversed(rows) if r.get("ymd") and r["ymd"] < today), None)
+        change = None
+        if prev and prev.get("close") is not None and row.get("close") is not None:
+            change = row["close"] - prev["close"]
+        line = _kospi_line(row.get("close"), change, row.get("rate"))
+        return (line, "ok") if line else (None, "unknown")
+
+    rt = _kospi_realtime()
+    if not rt:
+        log.warning("코스피 데이터를 가져오지 못했습니다 (마감 항목 없이 진행)")
+        return None, "unknown"
+
+    last = rows[-1] if rows else None
+    if last and last.get("close") is not None and abs(rt["close"] - last["close"]) < 0.005:
+        log.info("코스피 실시간값이 직전 거래일(%s) 종가와 동일 → 장이 열리지 않은 것으로 판단",
+                 last.get("ymd"))
+        return None, "closed"
+
+    line = _kospi_line(rt["close"], rt.get("change"), rt.get("rate"))
+    return (line, "ok") if line else (None, "unknown")
+
+
+def kospi_close_line():
+    """표시할 한 줄만 필요할 때. 확정되지 않았으면 None."""
+    return kospi_today()[0]
 
 
 # ===================== 텍스트 정리 =====================
@@ -365,7 +452,7 @@ def clean_for_telegram(text: str) -> str:
 def _join_broken_lines(text: str) -> str:
     lines = text.split("\n")
     # 새 블록의 시작으로 볼 패턴: 항목기호(·-•), 번호(1.), 이모지/대괄호 머리말, 빈 줄
-    starts = re.compile(r"^\s*(·|-|•|\d+\.|\[|☀|🌆|📈|📉|🎯|🔔|🗂|🏢|🚩|🌙|⚠)")
+    starts = re.compile(r"^\s*(·|-|•|\d+\.|\[|☀|🌆|📈|📉|📊|🎯|🎬|🔔|🗂|🏢|🚩|🌙|🕐|💡|✅|⚠)")
     # 문장이 끝났다고 볼 종결: 마침표/물음표/느낌표/콜론/따옴표/괄호 등
     ends_ok = re.compile(r'[.!?:;,)\]"”』」\d]$')
     result = []
@@ -434,19 +521,21 @@ def generate_brief_sync(pm: bool = False):
     system_text = (prompt_file.read_text(encoding="utf-8") + "\n\n"
                    + build_products_block() + "\n\n## 오늘 날짜 안내\n" + build_date_context(pm))
     if pm:
-        kospi = fetch_kospi_close()
+        kospi = kospi_close_line()
         if kospi:
-            system_text += ("\n\n## 코스피 마감 확정 데이터 (아래 숫자를 근거로 '오늘 코스피 마감' 첫 문장을 "
-                            "자연스러운 한 문장으로 쓴다. 숫자는 이 값에서 절대 바꾸지 마라)\n" + kospi)
+            system_text += ("\n\n## 오늘 코스피 마감 (확정 데이터)\n"
+                            "아래 한 줄을 '📉 오늘 코스피 마감' 바로 아래에 글자 하나 바꾸지 말고 그대로 넣는다. "
+                            "문장으로 풀어쓰지 말고 이 숫자 줄 그대로 쓴다.\n" + kospi)
         else:
-            system_text += ("\n\n## 코스피 마감\n확정 종가 데이터를 가져오지 못했다. "
-                            "추측하지 말고 '오늘 코스피 마감' 항목을 통째로 생략한다.")
+            system_text += ("\n\n## 오늘 코스피 마감\n"
+                            "오늘 거래일의 확정 종가를 확인하지 못했다. 추측하지 말고 "
+                            "'📉 오늘 코스피 마감' 항목을 제목까지 통째로 생략한다.")
     else:
         notable = market_data.notable_focus_products()
         if notable:
             system_text += (
                 "\n\n## 어제 집중 상품 움직임 데이터 (공개 데이터 · 네이버금융)\n"
-                "아래 줄들을 '📊 어제 집중 상품 움직임 (출처: 네이버금융 시세)' 항목에 각 상품 한 줄씩 그대로 넣는다. "
+                "아래 줄들을 '📊 어제 집중 상품 움직임' 항목에 각 상품 한 줄씩 그대로 넣는다. "
                 "표(| 기호)나 마크다운으로 만들지 말고, 제공된 줄 형식·순서를 바꾸지 마라. "
                 "소재 후보 판단에도 참고하되 집중 상품을 임의로 바꾸거나 투자권유로 쓰지 않는다.\n" + notable)
     user = "오늘의 KODEX 장 마감 브리핑을 작성해줘." if pm else "오늘의 KODEX 시황 브리핑을 작성해줘."
@@ -503,18 +592,51 @@ def web_generate_caption(text_in: str):
 
 
 # ===================== 발송 =====================
-async def send_long(bot, chat_id, text: str):
-    if len(text) <= TG_LIMIT:
-        await bot.send_message(chat_id=chat_id, text=text); return
-    chunk = ""
-    for line in text.split("\n"):
-        if len(chunk) + len(line) + 1 > TG_LIMIT:
+# 섹션 제목으로 쓰는 이모지들. 이 이모지로 시작하는 줄은 굵게 표시한다.
+_TITLE_EMOJI = "☀🌆📈📉📊🎯🎬🔔🗂🏢🚩🌙🕐💡✅⚠"
+
+
+def to_telegram_html(text: str) -> str:
+    """
+    브리핑 원문을 텔레그램 HTML로 바꾼다. 목적은 '읽기 쉽게' 딱 두 가지다.
+    1) 섹션 제목·소재 번호 줄을 굵게 → 훑어볼 수 있게
+    2) [매체명 - 기사제목](URL) 을 짧은 클릭 링크로 → 긴 URL이 화면을 먹지 않게
+    """
+    t = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    t = re.sub(r"\[([^\]\n]{1,150})\]\((https?://[^\s)]+)\)",
+               lambda m: '<a href="{}">{}</a>'.format(m.group(2), m.group(1).strip()), t)
+    out = []
+    for line in t.split("\n"):
+        s = line.strip()
+        bold = bool(s) and (s[0] in _TITLE_EMOJI or re.match(r"^\d+\.\s", s))
+        out.append(f"<b>{line}</b>" if bold else line)
+    return "\n".join(out)
+
+
+def _split_chunks(text: str, limit: int = 3400):
+    """줄 단위로 잘라 여러 조각으로. HTML 태그가 붙으면 길어지므로 여유를 둔다."""
+    chunks, chunk = [], ""
+    for line in (text or "").split("\n"):
+        if len(chunk) + len(line) + 1 > limit:
             if chunk:
-                await bot.send_message(chat_id=chat_id, text=chunk)
+                chunks.append(chunk)
             chunk = ""
         chunk = (chunk + "\n" + line) if chunk else line
     if chunk:
-        await bot.send_message(chat_id=chat_id, text=chunk)
+        chunks.append(chunk)
+    return chunks or [""]
+
+
+async def send_long(bot, chat_id, text: str):
+    for piece in _split_chunks(text):
+        try:
+            await bot.send_message(chat_id=chat_id, text=to_telegram_html(piece),
+                                   parse_mode="HTML", disable_web_page_preview=True)
+        except Exception:
+            # HTML 해석에 실패하면(드물게 특수문자 문제) 원문 그대로라도 반드시 보낸다.
+            log.warning("HTML 발송 실패 → 일반 텍스트로 재시도")
+            await bot.send_message(chat_id=chat_id, text=piece,
+                                   disable_web_page_preview=True)
 
 
 WELCOME = (
@@ -531,6 +653,7 @@ WELCOME = (
     "· /caption [대본·주제]  (업로드용 캡션·해시태그 생성)\n"
     "· /brief  (지금 오전형 브리핑 받기)\n"
     "· /pm  (지금 오후형 장중 브리핑 받기)\n"
+    "· /holiday  (오늘 자동 브리핑이 나가는 날인지 확인)\n"
 )
 
 
@@ -612,6 +735,30 @@ async def cmd_marketdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "집중 상품 전일 시세 (등락률 절댓값 큰 순 · 네이버금융 기준)\n\n" + block
         + "\n\n※ 진단용입니다. 이 숫자가 네이버금융 화면과 맞는지 확인되면 오전 브리핑에 연결합니다.")
+
+
+async def cmd_holiday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """오늘 자동 브리핑이 나갈 날인지 확인하는 진단 명령."""
+    today = datetime.now(TZ).date()
+    today_s = f"{today} ({WEEKDAY_KR[today.weekday()]})"
+    hol = holiday_name()
+    lines = [f"📅 오늘: {today_s}", ""]
+    if hol:
+        lines.append(f"· 증시 휴장 ({hol})")
+        lines.append("· 자동 브리핑: 오전·오후 모두 발송하지 않습니다.")
+    else:
+        lines.append("· 정상 거래일")
+        lines.append(f"· 자동 브리핑: 오전 {settings.SCHEDULE_HOUR:02d}:{settings.SCHEDULE_MINUTE:02d} / "
+                     f"오후 {settings.SCHEDULE_PM_HOUR:02d}:{settings.SCHEDULE_PM_MINUTE:02d} 발송 예정")
+        kospi = kospi_close_line()
+        lines.append(f"· 코스피 확정 마감: {kospi}" if kospi
+                     else "· 코스피 확정 마감: 아직 확인되지 않음 (장 마감 전이면 정상입니다)")
+    nxt = [(d, n) for d, n in sorted((getattr(settings, "MARKET_HOLIDAYS", {}) or {}).items())
+           if d > today.strftime("%Y-%m-%d")][:3]
+    if nxt:
+        lines += ["", "다음 휴장일"] + [f"· {d} {n}" for d, n in nxt]
+    lines += ["", "휴장일 목록은 settings.py의 MARKET_HOLIDAYS 에서 수정합니다."]
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -734,6 +881,10 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _brief_cmd(update, context, pm):
     label = "오후 장중" if pm else "오전"
+    hol = holiday_name()
+    if hol and hol != "주말":
+        await update.message.reply_text(
+            f"참고: 오늘은 {hol}(증시 휴장)입니다. 코스피 마감 항목은 빠진 상태로 작성됩니다.")
     await update.message.reply_text(f"{label} 브리핑을 작성 중입니다… (웹 검색 포함, 30초~1분 소요)")
     try:
         text, itok, otok = await asyncio.to_thread(generate_brief_sync, pm)
@@ -776,12 +927,47 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ===================== 자동 발송 =====================
+async def _tell_admin(context, msg):
+    """운영자에게만 짧게 알린다. 실패해도 조용히 넘어간다."""
+    if not ADMIN_CHAT_ID:
+        return
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg,
+                                       disable_web_page_preview=True)
+    except Exception:
+        pass
+
+
 async def broadcast(context, pm):
-    today = datetime.now(TZ).date()
-    if today.weekday() >= 5:
-        log.info("주말이므로 자동 발송 건너뜀"); return
+    label = "오후" if pm else "오전"
+
+    # ① 휴장일이면 아예 만들지 않고 끝낸다. (API 비용도 쓰지 않는다)
+    hol = holiday_name()
+    if hol and (pm or getattr(settings, "SKIP_AM_ON_HOLIDAY", True)):
+        log.info("%s이므로 %s 자동 발송 건너뜀", hol, label)
+        if hol != "주말" and getattr(settings, "NOTIFY_ADMIN_ON_HOLIDAY", True):
+            await _tell_admin(context, f"오늘은 {hol}(증시 휴장)이라 {label} 브리핑을 보내지 않았습니다.")
+        return
+
     if not TARGET_CHANNEL_ID:
         log.warning("TARGET_CHANNEL_ID 미설정 → 자동 발송 대상 없음"); return
+
+    # ② 오후 브리핑은 '오늘 장이 실제로 열렸는지'를 코스피 데이터로 한 번 더 확인한다.
+    #    목록에 없는 임시공휴일에도 잘못된 마감 수치가 나가지 않게 하는 안전망.
+    #    단순 조회 실패(unknown)일 때는 발송을 막지 않고 마감 항목만 빠진 채로 보낸다.
+    if pm:
+        _, status = kospi_today()
+        if status == "closed":
+            log.warning("오늘 장이 열리지 않은 것으로 판단 → 오후 자동 발송 건너뜀")
+            await _tell_admin(
+                context,
+                "오늘 코스피가 거래되지 않은 것으로 확인되어 오후 브리핑을 보내지 않았습니다.\n"
+                "임시공휴일이라면 정상 동작입니다. settings.py 의 MARKET_HOLIDAYS 에 그 날짜를 "
+                "추가해 두시면 다음부터는 더 빠르게 걸러집니다.")
+            return
+        if status == "unknown":
+            log.warning("코스피 마감을 확인하지 못했지만 거래일이므로 마감 항목 없이 발송")
+
     try:
         text, itok, otok = await asyncio.to_thread(generate_brief_sync, pm)
     except Exception:
@@ -839,6 +1025,7 @@ def main():
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("marketdata", cmd_marketdata))
+    app.add_handler(CommandHandler("holiday", cmd_holiday))
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("pm", cmd_pm))
