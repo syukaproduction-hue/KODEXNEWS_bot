@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>소파 이기기</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css">
+<style>
+*{box-sizing:border-box}
+:root{
+  color-scheme:light;
+  --paper:#f6f2e8; --paper2:#efe9db; --ink:#191712; --ink2:#4a453c; --ink3:#7d7669;
+  --rule:#191712; --hair:#c9c1ae;
+  --me:#1a5fb4; --sofa:#c0392b;
+  --mono:"SFMono-Regular",ui-monospace,Menlo,Consolas,"Courier New",monospace;
+  --sans:"Pretendard Variable",Pretendard,-apple-system,system-ui,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
+  color-scheme:dark;
+  --paper:#171512; --paper2:#211e19; --ink:#f2ede1; --ink2:#c0b9a8; --ink3:#8e8778;
+  --rule:#f2ede1; --hair:#4a453c;
+  --me:#4a8fd8; --sofa:#d4593c;
+}}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --paper:#171512; --paper2:#211e19; --ink:#f2ede1; --ink2:#c0b9a8; --ink3:#8e8778;
+  --rule:#f2ede1; --hair:#4a453c;
+  --me:#4a8fd8; --sofa:#d4593c;
+}
+html,body{margin:0}
+body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.62;
+  -webkit-font-smoothing:antialiased}
+.sheet{max-width:640px;margin:0 auto;padding:0 16px 90px}
+
+/* ---- 레트로 장부 머리글 ---- */
+.masthead{border-bottom:3px double var(--rule);padding:14px 0 10px;margin-bottom:0}
+.mastrow{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink2)}
+.mastrow b{font-weight:700;color:var(--ink)}
+h1{font-size:clamp(34px,10vw,58px);font-weight:800;letter-spacing:-.02em;line-height:.98;
+  margin:16px 0 6px;text-transform:none}
+.tagline{font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink2);border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);
+  padding:7px 0;margin:12px 0 0}
+.kicker{font-size:15.5px;color:var(--ink2);margin:16px 0 0}
+.kicker b{color:var(--ink)}
+
+.lbl{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--ink3);margin:26px 0 8px;display:flex;align-items:center;gap:9px}
+.lbl::after{content:"";flex:1;height:1px;background:var(--hair)}
+
+.rules{border:1px solid var(--rule);padding:0;margin:16px 0 0}
+.rules div{display:flex;gap:12px;padding:11px 14px;border-bottom:1px solid var(--hair);font-size:14px;color:var(--ink2)}
+.rules div:last-child{border-bottom:0}
+.rules i{font-family:var(--mono);font-style:normal;font-weight:700;color:var(--ink);flex:0 0 18px}
+.rules b{color:var(--ink)}
+
+/* ---- 선택 ---- */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:0;
+  border:1px solid var(--rule)}
+.cell{background:transparent;border:0;border-right:1px solid var(--hair);border-bottom:1px solid var(--hair);
+  padding:14px 8px;cursor:pointer;font-family:var(--sans);color:var(--ink);text-align:center}
+.cell:hover{background:var(--paper2)}
+.cell[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+.cell[aria-pressed="true"] .sub{color:var(--paper);opacity:.72}
+.cell .nm{font-size:14.5px;font-weight:700;letter-spacing:-.01em}
+.cell .sub{font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);margin-top:3px}
+.row3{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--rule);margin-top:0}
+.row3 .cell{border-bottom:0}
+.row3 .cell:last-child{border-right:0}
+
+.bigbtn{display:block;width:100%;margin-top:22px;background:var(--ink);color:var(--paper);
+  border:0;padding:19px;font-family:var(--mono);font-size:15px;font-weight:700;letter-spacing:.16em;
+  text-transform:uppercase;cursor:pointer}
+.bigbtn:hover{opacity:.87}
+.bigbtn.hollow{background:transparent;color:var(--ink);border:1px solid var(--rule)}
+
+.hide{display:none!important}
+
+/* ---- 진행 화면 ---- */
+.tape{display:flex;border:1px solid var(--rule);margin:6px 0 0}
+.tape div{flex:1;padding:12px 13px;border-right:1px solid var(--hair)}
+.tape div:last-child{border-right:0}
+.tape .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink3);display:flex;align-items:center;gap:6px}
+.tape .k i{width:10px;height:3px;display:inline-block}
+.tape .v{font-family:var(--mono);font-size:22px;font-weight:700;letter-spacing:-.02em;margin-top:4px;
+  font-variant-numeric:tabular-nums}
+.tape .d{font-family:var(--mono);font-size:11.5px;color:var(--ink2);font-variant-numeric:tabular-nums}
+
+.plot{border:1px solid var(--rule);border-top:0;position:relative;background:var(--paper)}
+.plot svg{display:block;width:100%;height:250px}
+.plotfoot{display:flex;align-items:center;gap:12px;padding:8px 12px;border-top:1px solid var(--hair);
+  font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3)}
+.plotfoot b{display:inline-flex;align-items:center;gap:6px;color:var(--ink2);font-weight:400}
+.plotfoot b i{width:12px;height:3px}
+.clock{margin-left:auto;color:var(--ink);font-weight:700}
+
+.speedrow{display:flex;gap:0;border:1px solid var(--rule);border-top:0}
+.speedrow button{flex:1;background:transparent;border:0;border-right:1px solid var(--hair);
+  padding:10px 4px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--ink2);cursor:pointer}
+.speedrow button:last-child{border-right:0}
+.speedrow button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+
+.stance{border:1px solid var(--rule);border-top:0;padding:11px;text-align:center;
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase}
+.stance.in{background:var(--me);color:#fff}
+.stance.out{background:var(--paper2);color:var(--ink2)}
+
+.dock{position:sticky;bottom:0;padding:12px 0 16px;background:linear-gradient(to top,var(--paper) 68%,transparent)}
+.toggle{display:block;width:100%;border:2px solid var(--rule);background:var(--ink);color:var(--paper);
+  padding:22px;font-family:var(--mono);font-size:17px;font-weight:700;letter-spacing:.14em;
+  text-transform:uppercase;cursor:pointer}
+.toggle.out{background:var(--paper);color:var(--ink)}
+.toggle:active{transform:translateY(1px)}
+.dockhint{text-align:center;font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink3);margin-top:8px}
+
+/* ---- 결과 ---- */
+.stamp{border:3px double var(--rule);padding:22px 18px;text-align:center;margin:6px 0 0}
+.stamp .sm{font-family:var(--mono);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--ink3)}
+.stamp .hl{font-size:clamp(25px,7.4vw,36px);font-weight:800;letter-spacing:-.02em;margin:8px 0 0;line-height:1.14}
+.stamp .sb{font-size:14.5px;color:var(--ink2);margin-top:11px;line-height:1.62}
+
+.ledger{width:100%;border-collapse:collapse;margin-top:8px;font-size:14.5px}
+.ledger th{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink3);text-align:left;padding:0 0 7px;border-bottom:1px solid var(--rule);font-weight:400}
+.ledger th:last-child,.ledger td:last-child{text-align:right}
+.ledger td{padding:11px 0;border-bottom:1px solid var(--hair);font-variant-numeric:tabular-nums}
+.ledger td:last-child{font-family:var(--mono);font-weight:700}
+.ledger tr.mine td{font-weight:800}
+.ledger tr.mine td:first-child::after{content:" ← 내가 고른 것";font-family:var(--mono);font-size:9.5px;
+  letter-spacing:.08em;font-weight:400;color:var(--me)}
+.up{color:var(--sofa)} .dn{color:var(--me)}
+
+.mbar{height:36px;border:1px solid var(--rule);position:relative;background:var(--paper2);margin-top:26px}
+.mbar .fill{position:absolute;left:0;top:0;bottom:0;background:var(--hair);opacity:.55}
+.mbar .pin{position:absolute;top:-5px;bottom:-5px;width:2px;background:var(--me)}
+.mbar .pin.s{background:var(--sofa)}
+.mbar .pin span{position:absolute;top:-15px;left:50%;transform:translateX(-50%);
+  font-family:var(--mono);font-size:9px;letter-spacing:.08em;white-space:nowrap;color:inherit}
+.mfoot{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9.5px;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);margin-top:7px}
+.note{font-size:13.5px;color:var(--ink2);margin-top:11px;line-height:1.62}
+.note b{color:var(--ink)}
+
+.rec{display:flex;border:1px solid var(--rule);margin-top:18px}
+.rec div{flex:1;padding:13px 6px;text-align:center;border-right:1px solid var(--hair)}
+.rec div:last-child{border-right:0}
+.rec .n{font-family:var(--mono);font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.rec .l{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink3)}
+
+.fineprint{margin-top:28px;border-top:3px double var(--rule);padding-top:14px;
+  font-size:11.5px;color:var(--ink3);line-height:1.78}
+.fineprint b{color:var(--ink2)}
+.copymsg{text-align:center;font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--me);min-height:16px;margin-top:9px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style></head>
+<body>
+<div class="sheet">
+
+  <header class="masthead">
+    <div class="mastrow"><span id="dataStamp">모의 시장 · 연습용 데이터</span><span>제 1 호</span></div>
+  </header>
+
+  <!-- ============ 시작 ============ -->
+  <section id="scr-start">
+    <h1>소파 이기기</h1>
+    <div class="tagline">당신의 상대는 소파입니다 · 한 번 사고 아무것도 하지 않습니다</div>
+    <p class="kicker">차트는 <b>알아서 흘러갑니다.</b> 당신이 할 일은 버튼 하나 —
+      들고 갈지, 팔고 빠질지. <b>누르는 시점만</b> 정하면 됩니다.</p>
+
+    <div class="rules">
+      <div><i>1</i><span><b>1,000만원</b>으로 시작합니다.</span></div>
+      <div><i>2</i><span>차트가 흐르는 동안 <b>아무 때나</b> 사고팔 수 있습니다.</span></div>
+      <div><i>3</i><span>팔고 빠져 있는 동안엔 <b>연 2.0% 이자</b>가 붙습니다.</span></div>
+      <div><i>4</i><span>소파는 첫날 사서 <b>끝까지 그대로</b> 둡니다.</span></div>
+    </div>
+
+    <div class="lbl">무엇으로</div>
+    <div class="grid" id="assetGrid"></div>
+
+    <div class="lbl">기간</div>
+    <div class="row3" id="lenRow">
+      <button class="cell" data-y="1" aria-pressed="false"><div class="nm">1년</div><div class="sub">짧게</div></button>
+      <button class="cell" data-y="2" aria-pressed="true"><div class="nm">2년</div><div class="sub">기본</div></button>
+      <button class="cell" data-y="5" aria-pressed="false"><div class="nm">5년</div><div class="sub">길게</div></button>
+    </div>
+
+    <button class="bigbtn" id="btnStart">시작</button>
+    <div class="lbl">내 전적</div>
+    <div class="rec" id="rec1"></div>
+
+    <div class="lbl hide" id="ledLbl1">전체 장부</div>
+    <div class="rec hide" id="led1"></div>
+    <div class="note hide" id="ledNote1"></div>
+  </section>
+
+  <!-- ============ 진행 ============ -->
+  <section id="scr-play" class="hide">
+    <div class="tape">
+      <div><div class="k"><i style="background:var(--me)"></i>내 돈</div>
+        <div class="v" id="myVal">1,000만</div><div class="d" id="myPct">0.0%</div></div>
+      <div><div class="k"><i style="background:var(--sofa)"></i>소파</div>
+        <div class="v" id="sfVal">1,000만</div><div class="d" id="sfPct">0.0%</div></div>
+    </div>
+
+    <div class="plot">
+      <svg id="chart" viewBox="0 0 900 250" role="img"
+           aria-label="내 돈과 소파의 자산 추이"></svg>
+      <div class="plotfoot">
+        <b><i style="background:var(--me)"></i>내 돈</b>
+        <b><i style="background:var(--sofa)"></i>소파</b>
+        <span class="clock" id="clock"></span>
+      </div>
+    </div>
+
+    <div class="speedrow" id="speedRow">
+      <button data-s="0" aria-pressed="false">일시정지</button>
+      <button data-s="1" aria-pressed="true">1배속</button>
+      <button data-s="2" aria-pressed="false">2배속</button>
+      <button data-s="4" aria-pressed="false">4배속</button>
+    </div>
+    <div class="stance in" id="stance">보유 중</div>
+
+    <div class="dock">
+      <button class="toggle" id="btnToggle">팔기</button>
+      <div class="dockhint">스페이스바로도 누를 수 있습니다</div>
+    </div>
+  </section>
+
+  <!-- ============ 결과 ============ -->
+  <section id="scr-end" class="hide">
+    <div class="stamp">
+      <div class="sm" id="vTag">최종 판정</div>
+      <div class="hl" id="vHl"></div>
+      <div class="sb" id="vSb"></div>
+    </div>
+
+    <div class="tape" style="border-top:0">
+      <div><div class="k"><i style="background:var(--me)"></i>내 결과</div>
+        <div class="v" id="rMe"></div><div class="d" id="rMeAmt"></div></div>
+      <div><div class="k"><i style="background:var(--sofa)"></i>소파</div>
+        <div class="v" id="rSf"></div><div class="d" id="rSfAmt"></div></div>
+    </div>
+
+    <div class="plot">
+      <svg id="chartEnd" viewBox="0 0 900 250" role="img"
+           aria-label="최종 자산 추이"></svg>
+      <div class="plotfoot">
+        <b><i style="background:var(--me)"></i>내 돈</b>
+        <b><i style="background:var(--sofa)"></i>소파</b>
+        <span class="clock" id="clockEnd"></span>
+      </div>
+    </div>
+
+    <div class="lbl">아무 생각 없이 눌렀다면 · 원숭이 1,000번</div>
+    <div class="mbar"><span class="fill" id="mFill"></span>
+      <span class="pin s" id="mSofa"><span>소파</span></span>
+      <span class="pin" id="mMark"><span>나</span></span></div>
+    <div class="mfoot"><span>최하위</span><span>최상위</span></div>
+    <div class="note" id="mNote"></div>
+
+    <div class="lbl">같은 기간 · 그냥 들고만 있었다면</div>
+    <table class="ledger"><thead><tr><th>자산</th><th>수익률</th></tr></thead><tbody id="cmpBody"></tbody></table>
+    <div class="note" id="cmpNote"></div>
+
+    <div class="lbl">내 전적</div>
+    <div class="rec" id="rec2"></div>
+
+    <div class="lbl hide" id="ledLbl2">전체 장부</div>
+    <div class="rec hide" id="led2"></div>
+    <div class="note hide" id="ledNote2"></div>
+
+    <button class="bigbtn" id="btnAgain">다시 하기</button>
+    <button class="bigbtn hollow" id="btnShare">결과 복사</button>
+    <div class="copymsg" id="copyMsg"></div>
+  </section>
+
+  <div class="fineprint">
+    <b>교육·오락용 시뮬레이션입니다.</b> 특정 종목·펀드·ETF에 대한 투자 권유가 아니며 어떤 상품도 추천하지 않습니다.
+    게임 결과는 과거 데이터를 이용한 가정이고 미래 수익을 보장하지 않습니다.
+    실제 투자에는 세금·거래비용·슬리피지가 발생하며 이 게임은 이를 반영하지 않습니다.
+    투자 판단과 그 결과는 투자자 본인에게 귀속됩니다.
+    <span id="srcline"></span>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* =====================================================================
+   소파 이기기 — 실시간 진행판
+   · 차트가 스스로 흐르고, 사용자는 '보유/현금'을 아무 때나 토글한다
+   · market_history.json 이 있으면 실제 데이터, 없으면 연습용 가상 데이터
+   ===================================================================== */
+
+const ASSETS = [
+  {id:"kospi",   name:"코스피",     sub:"대표 지수", drift:0.055, vol:0.165, swing:0.16, base:2400},
+  {id:"kosdaq",  name:"코스닥",     sub:"더 출렁",   drift:0.040, vol:0.235, swing:0.24, base:800},
+  {id:"samsung", name:"삼성전자",   sub:"종목 하나", drift:0.090, vol:0.270, swing:0.25, base:60000},
+  {id:"hynix",   name:"SK하이닉스", sub:"가장 출렁", drift:0.110, vol:0.360, swing:0.34, base:90000},
+  {id:"bond",    name:"채권",       sub:"안전자산",  drift:0.032, vol:0.025, swing:0.02, base:100},
+];
+const START_CASH   = 10000000;
+const CASH_APR     = 0.020;
+const TRADING_DAYS = 245;
+const DAYS_PER_SEC = 17;      // 1배속에서 초당 흐르는 거래일
+
+let DATA=null, IS_REAL=false;
+const $ = id => document.getElementById(id);
+
+/* ---------- 가상 데이터 (고정 시드) ---------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function gauss(r){let u=0,v=0;while(!u)u=r();while(!v)v=r();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
+
+function buildDemoData(years){
+  const KAPPA=0.004, SEED=31337, n=years*TRADING_DAYS, series={}, dates=[];
+  for(let i=0;i<n;i++) dates.push(i);
+  ASSETS.forEach((a,ai)=>{
+    const rnd=mulberry32(SEED+ai*7919), sd=a.vol/Math.sqrt(TRADING_DAYS), muD=a.drift/TRADING_DAYS;
+    const b0=Math.log(a.base); let lp=b0; const arr=[a.base];
+    let bull=true, left=70+Math.floor(rnd()*150);
+    for(let i=1;i<n;i++){
+      if(--left<=0){ bull=!bull; left=70+Math.floor(rnd()*190); }
+      lp += muD + (bull?a.swing:-a.swing)/TRADING_DAYS + KAPPA*((b0+muD*i)-lp)
+            - 0.5*sd*sd + sd*gauss(rnd);
+      arr.push(Math.exp(lp));
+    }
+    series[a.id]=arr;
+  });
+  return {dates, series};
+}
+
+async function loadData(){
+  try{
+    if(location.protocol==="file:") throw new Error("local");
+    // /sofa 로 서비스될 때는 /sofa/market_history.json, 파일 배치로 열 때는 같은 폴더
+    const url = /^\/sofa(\/|$)/.test(location.pathname) ? "/sofa/market_history.json"
+                                                        : "market_history.json";
+    const r=await fetch(url,{cache:"no-store"});
+    if(r.ok){
+      const j=await r.json();
+      if(j&&j.series&&ASSETS.every(a=>Array.isArray(j.series[a.id])&&j.series[a.id].length>300)){
+        DATA=j; IS_REAL=true;
+        $("dataStamp").textContent="실제 시장 데이터";
+        $("srcline").textContent=" 시세 출처: 네이버금융 공개 데이터"+(j.updated?" (기준 "+j.updated+")":"")+".";
+        return;
+      }
+    }
+  }catch(e){}
+  DATA=buildDemoData(12);
+  $("dataStamp").textContent="모의 시장 · 연습용 데이터";
+  $("srcline").innerHTML=" <b>이 화면은 연습용 가상 데이터이며 실제 시세가 아닙니다.</b>";
+}
+
+/* ---------- 전적 ---------- */
+const KEY="sofa_rec_v2";
+function getRec(){try{return JSON.parse(localStorage.getItem(KEY))||{play:0,win:0,skill:0};}
+  catch(e){return window.__rec||{play:0,win:0,skill:0};}}
+function setRec(r){window.__rec=r;try{localStorage.setItem(KEY,JSON.stringify(r));}catch(e){}}
+function paintRec(){
+  const r=getRec();
+  const h = r.play===0
+    ? '<div><div class="n">—</div><div class="l">기록 없음</div></div>'
+    : '<div><div class="n">'+r.play+'</div><div class="l">플레이</div></div>'
+     +'<div><div class="n">'+r.win+'</div><div class="l">소파 이김</div></div>'
+     +'<div><div class="n">'+r.skill+'</div><div class="l">실력 승</div></div>'
+     +'<div><div class="n">'+Math.round(r.win/r.play*100)+'%</div><div class="l">승률</div></div>';
+  ["rec1","rec2"].forEach(id=>{const el=$(id); if(el) el.innerHTML=h;});
+}
+
+/* ---------- 상태 ---------- */
+let G=null, raf=null, lastT=0, speed=1;
+const won = v => v>=100000000 ? (v/100000000).toFixed(2)+"억" : Math.round(v/10000).toLocaleString()+"만";
+const pct = v => (v>=0?"+":"")+v.toFixed(1)+"%";
+
+function startGame(assetId, years){
+  const px=DATA.series[assetId], span=Math.round(years*TRADING_DAYS);
+  if(px.length < span+12){ alert("이 기간을 돌릴 데이터가 부족합니다."); return; }
+  const s0=Math.floor(Math.random()*(px.length-span-1));
+  G={assetId, asset:ASSETS.find(a=>a.id===assetId), years, span, s0, px,
+     day:0, holding:true, my:START_CASH,
+     myH:[START_CASH], sfH:[START_CASH],
+     segs:[], heldDays:0, trades:0, done:false};
+  $("scr-start").classList.add("hide"); $("scr-end").classList.add("hide");
+  $("scr-play").classList.remove("hide");
+  setSpeed(1); paintStance(); draw("chart","clock");
+  lastT=performance.now(); raf=requestAnimationFrame(tick);
+}
+
+function advance(days){
+  const {px,s0}=G;
+  for(let k=0;k<days && G.day<G.span;k++){
+    const i0=s0+G.day, i1=i0+1;
+    if(G.holding){ G.my *= px[i1]/px[i0]; G.heldDays++; }
+    else { G.my *= Math.pow(1+CASH_APR, 1/TRADING_DAYS); }
+    G.day++;
+    G.myH.push(G.my);
+    G.sfH.push(START_CASH*px[s0+G.day]/px[s0]);
+  }
+}
+
+function tick(t){
+  if(!G||G.done) return;
+  const dt=Math.min(0.25,(t-lastT)/1000); lastT=t;
+  if(speed>0){
+    const acc=(G.acc||0)+dt*DAYS_PER_SEC*speed;
+    const whole=Math.floor(acc); G.acc=acc-whole;
+    if(whole>0) advance(whole);
+  }
+  draw("chart","clock"); paintTape();
+  if(G.day>=G.span){ finish(); return; }
+  raf=requestAnimationFrame(tick);
+}
+
+function paintTape(){
+  const sf=G.sfH[G.sfH.length-1];
+  $("myVal").textContent=won(G.my); $("sfVal").textContent=won(sf);
+  $("myPct").textContent=pct((G.my/START_CASH-1)*100);
+  $("sfPct").textContent=pct((sf/START_CASH-1)*100);
+}
+
+function paintStance(){
+  const s=$("stance"), b=$("btnToggle");
+  if(G.holding){ s.textContent="보유 중"; s.className="stance in"; b.textContent="팔기"; b.className="toggle"; }
+  else { s.textContent="현금 보유 · 시장 밖"; s.className="stance out"; b.textContent="사기"; b.className="toggle out"; }
+}
+
+function toggleStance(){
+  if(!G||G.done) return;
+  if(G.holding) G.segs.push({from:G.day, to:null});      // 현금 구간 시작
+  else { const last=G.segs[G.segs.length-1]; if(last&&last.to===null) last.to=G.day; }
+  G.holding=!G.holding; G.trades++; paintStance();
+}
+
+function setSpeed(s){
+  speed=s;
+  [...$("speedRow").children].forEach(b=>b.setAttribute("aria-pressed", (+b.dataset.s)===s));
+}
+
+/* ---------- 차트 ---------- */
+function monthsOf(d){ return Math.floor(d/TRADING_DAYS*12); }
+function spanLabel(){ return G.years===1 ? "1년" : G.years+"년"; }
+function elapsedLabel(){
+  if(IS_REAL && DATA.dates){
+    const v=DATA.dates[Math.min(DATA.dates.length-1, G.s0+G.day)];
+    if(v){ const t=String(v); return t.slice(0,4)+"."+t.slice(4,6); }
+  }
+  const m=monthsOf(G.day);
+  if(m<12) return m+"개월";
+  const y=Math.floor(m/12), mm=m%12;
+  return mm===0 ? y+"년" : y+"년 "+mm+"개월";
+}
+
+function draw(svgId, clockId){
+  const svg=$(svgId), H=250, PL=8, PR=62, PT=14, PB=18;
+  // 실제 표시 폭을 viewBox 로 그대로 써서 글자·점이 가로로 찌그러지지 않게 한다
+  const W=Math.max(280, Math.round(svg.clientWidth||svg.getBoundingClientRect().width||360));
+  svg.setAttribute("viewBox","0 0 "+W+" "+H);
+  const myH=G.myH, sfH=G.sfH;
+  // x축은 진행에 따라 늘어난다 (초반에 선이 왼쪽 끝에만 몰리지 않게)
+  const n=Math.max(Math.round(G.span*0.18), Math.min(G.span, G.day||1));
+  let lo=Infinity, hi=-Infinity;
+  for(let i=0;i<myH.length;i++){ const a=myH[i],b=sfH[i];
+    if(a<lo)lo=a; if(a>hi)hi=a; if(b<lo)lo=b; if(b>hi)hi=b; }
+  if(lo>START_CASH) lo=START_CASH; if(hi<START_CASH) hi=START_CASH;
+  // 최소 표시 범위를 둬서 초반 잔파동이 산맥처럼 과장되지 않게 한다
+  const floorLo=START_CASH*0.93, floorHi=START_CASH*1.07;
+  if(lo>floorLo) lo=floorLo; if(hi<floorHi) hi=floorHi;
+  const pad=(hi-lo)*0.10; lo-=pad; hi+=pad;
+  const X=i=>PL+(i/n)*(W-PL-PR), Y=v=>PT+(1-(v-lo)/(hi-lo))*(H-PT-PB);
+  let g="";
+
+  // 현금으로 빠져 있던 구간을 옅게 칠한다 (장부에 표시하듯)
+  for(const s of G.segs){
+    const to = s.to===null ? G.day : s.to;
+    const x1=X(s.from), x2=X(to);
+    if(x2>x1) g+=`<rect x="${x1.toFixed(1)}" y="${PT}" width="${(x2-x1).toFixed(1)}" height="${H-PT-PB}" fill="var(--hair)" opacity="0.34"/>`;
+  }
+  // 원금 기준선
+  const y0=Y(START_CASH);
+  g+=`<line x1="${PL}" y1="${y0.toFixed(1)}" x2="${W-PR}" y2="${y0.toFixed(1)}" stroke="var(--hair)" stroke-width="1" stroke-dasharray="2 5"/>`;
+  g+=`<text x="${PL+3}" y="${(y0-5).toFixed(1)}" font-size="9.5" font-family="var(--mono)" fill="var(--ink3)">원금</text>`;
+
+  const path=arr=>{let s="";for(let i=0;i<arr.length;i++)s+=(i?"L":"M")+X(i).toFixed(1)+","+Y(arr[i]).toFixed(1);return s;};
+  g+=`<path d="${path(sfH)}" fill="none" stroke="var(--sofa)" stroke-width="2" stroke-dasharray="6 3" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`;
+  g+=`<path d="${path(myH)}" fill="none" stroke="var(--me)" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`;
+
+  const li=myH.length-1;
+  let ym=Y(myH[li]), ys=Y(sfH[li]);
+  g+=`<circle cx="${X(li).toFixed(1)}" cy="${ys.toFixed(1)}" r="3.5" fill="var(--sofa)"/>`;
+  g+=`<circle cx="${X(li).toFixed(1)}" cy="${ym.toFixed(1)}" r="3.5" fill="var(--me)"/>`;
+  if(Math.abs(ym-ys)<13){ const c=(ym+ys)/2; if(myH[li]>=sfH[li]){ym=c-7;ys=c+7;} else {ym=c+7;ys=c-7;} }
+  g+=`<text x="${(X(li)+7).toFixed(1)}" y="${(ys+3.5).toFixed(1)}" font-size="11" font-weight="700" font-family="var(--mono)" fill="var(--sofa)">소파</text>`;
+  g+=`<text x="${(X(li)+7).toFixed(1)}" y="${(ym+3.5).toFixed(1)}" font-size="11" font-weight="700" font-family="var(--mono)" fill="var(--me)">나</text>`;
+  svg.innerHTML=g;
+  const c=$(clockId);
+  if(c) c.textContent = IS_REAL ? (elapsedLabel()+" · "+spanLabel()+" 중")
+                                : (elapsedLabel()+" / "+spanLabel());
+}
+
+/* ---------- 원숭이 ---------- */
+function monkeys(n){
+  const {px,s0,span}=G, out=[];
+  const cashStep=Math.pow(1+CASH_APR,1/TRADING_DAYS);
+  // 원숭이도 사람처럼 '가끔' 매매한다: 하루 2% 확률로 태세 전환
+  for(let k=0;k<n;k++){
+    let v=START_CASH, hold=true;
+    for(let d=0;d<span;d++){
+      if(Math.random()<0.02) hold=!hold;
+      v = hold ? v*px[s0+d+1]/px[s0+d] : v*cashStep;
+    }
+    out.push(v);
+  }
+  return out.sort((a,b)=>a-b);
+}
+
+function finish(){
+  G.done=true; if(raf) cancelAnimationFrame(raf);
+  const my=G.my, sf=G.sfH[G.sfH.length-1];
+  const myR=(my/START_CASH-1)*100, sfR=(sf/START_CASH-1)*100;
+  const sim=monkeys(1000);
+  const rank=sim.filter(v=>v<my).length/sim.length;
+  const gap=(my-sf)/sf, tie=Math.abs(gap)<0.001, beat=!tie&&gap>0;
+
+  let tag,hl,sb;
+  if(tie){
+    tag="무승부"; hl="소파와 똑같습니다";
+    sb = G.trades===0
+      ? "한 번도 팔지 않았으니 당연한 결과입니다. 소파가 하는 일이 바로 그거예요 — 이게 이 게임의 핵심입니다."
+      : G.trades+"번 사고팔았는데도 그냥 들고 있는 것과 결과가 같았습니다. 오간 수고가 남지 않았습니다.";
+  } else if(!beat){
+    tag="패"; hl="소파에게 졌습니다";
+    sb="아무것도 하지 않은 소파가 "+Math.abs(sfR-myR).toFixed(1)+"%p 앞섰습니다. "
+      +G.trades+"번 사고팔면서 오르는 구간을 놓친 겁니다.";
+  } else if(rank>=0.9){
+    tag="실력 승"; hl="실력으로 이겼습니다";
+    sb="소파를 이겼고, 아무 생각 없이 누른 원숭이 1,000마리 중 상위 "
+      +Math.max(1,Math.round((1-rank)*100))+"% 안에 들었습니다. 운으로 설명되지 않는 결과입니다.";
+  } else {
+    tag="운 승"; hl="이겼지만, 운이었습니다";
+    sb="소파는 이겼습니다. 다만 원숭이 분포의 "+Math.round(rank*100)
+      +"% 수준입니다. 같은 판을 다시 하면 뒤집힐 수 있습니다.";
+  }
+  $("vTag").textContent=tag; $("vHl").textContent=hl; $("vSb").textContent=sb;
+  $("rMe").textContent=pct(myR); $("rSf").textContent=pct(sfR);
+  $("rMeAmt").textContent=won(my)+"원"; $("rSfAmt").textContent=won(sf)+"원";
+
+  const lo=sim[0], hi=sim[sim.length-1], sp=(hi-lo)||1;
+  const posMy=Math.min(98,Math.max(1,(my-lo)/sp*100));
+  const posSf=Math.min(98,Math.max(1,(sf-lo)/sp*100));
+  $("mFill").style.width=posMy+"%";
+  $("mMark").style.left="calc("+posMy+"% - 1px)";
+  $("mSofa").style.left="calc("+posSf+"% - 1px)";
+  $("mNote").innerHTML="원숭이 1,000마리 중 <b>"+(sim.filter(v=>v>sf).length/10).toFixed(0)
+    +"%</b>가 소파를 이겼습니다. 내 위치는 <b>"+Math.round(rank*100)+"%</b> 지점입니다. "
+    +"이번 판에서 나는 전체의 <b>"+Math.round(G.heldDays/G.span*100)+"%</b> 기간만 시장에 있었고, "
+    +"<b>"+G.trades+"번</b> 사고팔았습니다.";
+
+  const i1=G.s0+G.span;
+  const rows=ASSETS.map(a=>({a, r:(DATA.series[a.id][i1]/DATA.series[a.id][G.s0]-1)*100}))
+                   .sort((x,y)=>y.r-x.r);
+  $("cmpBody").innerHTML=rows.map(o=>
+    '<tr class="'+(o.a.id===G.assetId?"mine":"")+'"><td>'+o.a.name+'</td>'
+    +'<td class="'+(o.r>=0?"up":"dn")+'">'+pct(o.r)+'</td></tr>').join("");
+  $("cmpNote").innerHTML="이 기간에는 <b>"+rows[0].a.name+"</b>이 가장 높고 <b>"
+    +rows[rows.length-1].a.name+"</b>이 가장 낮았습니다. 어디에 넣어뒀는지가 언제 사고팔았는지보다 "
+    +"결과를 더 크게 흔들었습니다. 다만 <b>구간을 바꾸면 순서도 바뀝니다</b> — 무작위로 뽑은 한 기간일 뿐입니다.";
+
+  const r=getRec(); r.play++; if(beat)r.win++; if(beat&&rank>=0.9)r.skill++; setRec(r); paintRec();
+
+  $("scr-play").classList.add("hide"); $("scr-end").classList.remove("hide");
+  draw("chartEnd","clockEnd");
+  window.scrollTo({top:0,behavior:"smooth"});
+  window.__share=G.asset.name+" "+G.years+"년 · 나 "+pct(myR)+" vs 소파 "+pct(sfR)+" → "+hl
+    +(IS_REAL?"":" (연습용 가상 데이터)");
+
+  pushResult({asset:G.assetId, years:G.years,
+              outcome: tie?"tie":(beat?"win":"lose"),
+              skilled: (beat&&rank>=0.9)?1:0,
+              my_ret:+myR.toFixed(2), sofa_ret:+sfR.toFixed(2),
+              trades:G.trades, in_pct:Math.round(G.heldDays/G.span*100),
+              real: IS_REAL?1:0}).then(paintLedger);
+}
+
+/* ---------- 배선 ---------- */
+let selAsset="kospi", selYears=2;
+$("assetGrid").innerHTML=ASSETS.map(a=>
+  '<button class="cell" data-id="'+a.id+'" aria-pressed="'+(a.id===selAsset)+'">'
+  +'<div class="nm">'+a.name+'</div><div class="sub">'+a.sub+'</div></button>').join("");
+$("assetGrid").addEventListener("click",e=>{const b=e.target.closest(".cell"); if(!b)return;
+  selAsset=b.dataset.id; [...$("assetGrid").children].forEach(c=>c.setAttribute("aria-pressed",c===b));});
+$("lenRow").addEventListener("click",e=>{const b=e.target.closest(".cell"); if(!b)return;
+  selYears=+b.dataset.y; [...$("lenRow").children].forEach(c=>c.setAttribute("aria-pressed",c===b));});
+$("speedRow").addEventListener("click",e=>{const b=e.target.closest("button"); if(!b)return; setSpeed(+b.dataset.s);});
+$("btnStart").addEventListener("click",()=>startGame(selAsset,selYears));
+$("btnToggle").addEventListener("click",toggleStance);
+$("btnAgain").addEventListener("click",()=>{
+  $("scr-end").classList.add("hide"); $("scr-start").classList.remove("hide");
+  window.scrollTo({top:0,behavior:"smooth"});});
+$("btnShare").addEventListener("click",()=>{
+  const t=window.__share||"";
+  if(navigator.clipboard) navigator.clipboard.writeText(t).then(()=>{$("copyMsg").textContent="복사됐습니다";});
+  else $("copyMsg").textContent=t;});
+document.addEventListener("keydown",e=>{
+  if(e.code==="Space" && G && !G.done && !$("scr-play").classList.contains("hide")){
+    e.preventDefault(); toggleStance();
+  }});
+
+/* ---------- 전체 장부 (사이트에서 열었을 때만 동작) ---------- */
+const HAS_API = /^\/sofa(\/|$)/.test(location.pathname);
+
+async function pushResult(payload){
+  if(!HAS_API) return;
+  try{
+    await fetch("/sofa/record",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload)});
+  }catch(e){}
+}
+
+async function paintLedger(){
+  if(!HAS_API) return;
+  try{
+    const r=await fetch("/sofa/stats",{cache:"no-store"});
+    if(!r.ok) return;
+    const j=await r.json();
+    if(!j || !j.play) return;
+    const h='<div><div class="n">'+j.play.toLocaleString()+'</div><div class="l">전체 플레이</div></div>'
+      +'<div><div class="n">'+j.couch_pct+'%</div><div class="l">소파 승</div></div>'
+      +'<div><div class="n">'+j.lucky_pct+'%</div><div class="l">운으로 승</div></div>'
+      +'<div><div class="n">'+j.skill_pct+'%</div><div class="l">실력으로 승</div></div>';
+    const note="지금까지 <b>"+j.play.toLocaleString()+"번</b> 플레이했고, 그중 <b>"
+      +j.couch_pct+"%</b>는 아무것도 하지 않은 소파가 이겼습니다."
+      +(j.play<30?" (표본이 아직 적습니다)":"");
+    [1,2].forEach(i=>{
+      $("ledLbl"+i).classList.remove("hide");
+      const el=$("led"+i); el.classList.remove("hide"); el.innerHTML=h;
+      const n=$("ledNote"+i); n.classList.remove("hide"); n.innerHTML=note;
+    });
+  }catch(e){}
+}
+
+window.addEventListener("resize",()=>{
+  if(G && !$("scr-play").classList.contains("hide")) draw("chart","clock");
+  if(G && G.done && !$("scr-end").classList.contains("hide")) draw("chartEnd","clockEnd");
+});
+
+loadData().then(()=>{ paintRec(); paintLedger(); });
+</script>
+</body></html>
