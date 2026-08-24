@@ -1,0 +1,2 @@
+# Preserve CRLF bytes in GitHub ZIP archives; batch files are binary to Git.
+*.bat binary
