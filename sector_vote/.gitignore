@@ -1,0 +1,7 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.collector-venv/
+*.db
+.env
