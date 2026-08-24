@@ -72,7 +72,6 @@ def classify_transcript(transcript: str, api_key: str, model: str = "claude-sonn
     message = client.messages.create(
         model=model,
         max_tokens=1800,
-        temperature=0,
         messages=[{"role": "user", "content": build_prompt(transcript)}],
     )
     raw = "".join(block.text for block in message.content if getattr(block, "type", "") == "text")
