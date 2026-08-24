@@ -66,6 +66,34 @@ uv run --with-requirements sector_vote/requirements-dev.txt ruff check sector_vo
    - `SECTOR_DB_PATH=/data/sector_vote.db`
 5. Health check: `/health`
 
+## Railway가 YouTube 자막을 차단당할 때: 로컬 수집기
+
+YouTube는 Railway 같은 클라우드 IP의 자막 요청을 차단할 수 있습니다. 이 경우 Windows PC의 일반 인터넷 회선에서 자막만 수집하고, 보호된 API로 Railway에 전송합니다. AI 분류와 DB 저장은 Railway가 계속 담당합니다.
+
+### 가장 쉬운 실행 방법
+
+1. GitHub의 `feature/sector-vote` 브랜치를 ZIP으로 내려받아 압축을 풉니다.
+2. `sector_vote/run_local_collector.bat`를 더블클릭합니다.
+3. 최초 실행 때 전용 가상환경과 패키지를 자동 설치합니다.
+4. 검은 창에서 Railway의 `SECTOR_ADMIN_TOKEN`을 입력합니다. 입력 문자는 화면에 보이지 않습니다.
+5. 20개 채널의 최근 36시간 영상을 확인하고, 자막이 있는 영상만 서버로 전송합니다.
+
+토큰은 메모리에서만 사용하며 GitHub나 파일에 저장하지 않습니다. 이미 처리된 영상은 내부 근거 API를 조회해 건너뜁니다.
+
+### 명령줄 실행
+
+저장소 루트에서:
+
+```bash
+uv run --with-requirements sector_vote/requirements.txt python -m sector_vote.local_collector
+```
+
+다른 Railway 주소를 사용할 때:
+
+```bash
+uv run --with-requirements sector_vote/requirements.txt python -m sector_vote.local_collector --url https://example.up.railway.app
+```
+
 ## 자동 갱신
 
 cron-job.org 같은 외부 스케줄러에서 평일 오전 또는 원하는 시각에 아래 요청을 보냅니다.

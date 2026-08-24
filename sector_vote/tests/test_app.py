@@ -48,6 +48,26 @@ def test_manual_ingest_builds_sector_only_public_summary(tmp_path):
     assert "transcript" not in evidence[0]
 
 
+def test_processed_videos_endpoint_includes_zero_call_video(tmp_path):
+    app = create_app(tmp_path / "sector.db", admin_token="secret", classify_fn=lambda _text: [])
+    client = TestClient(app)
+    headers = {"X-Admin-Token": "secret"}
+    client.post("/api/ingest/transcript", headers=headers, json={
+        "video_id": "empty",
+        "channel": "채널A",
+        "title": "방향 없는 영상",
+        "url": "https://youtube.com/watch?v=empty",
+        "published_at": "2026-08-24T08:00:00+09:00",
+        "transcript": "이 영상에는 다음 거래일 섹터 방향을 특정하는 내용이 없습니다.",
+    })
+
+    assert client.get("/api/videos").status_code == 401
+    response = client.get("/api/videos", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == {"video_ids": ["empty"]}
+
+
 def test_health_reports_ready(tmp_path):
     client = TestClient(create_app(tmp_path / "sector.db", admin_token="secret", classify_fn=_classifier))
 

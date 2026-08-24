@@ -58,3 +58,4 @@ def test_store_normalizes_published_time_to_utc(tmp_path):
         ).fetchone()[0]
 
     assert published_at == "2026-08-23T23:00:00+00:00"
+    assert store.list_video_ids() == {"offset"}

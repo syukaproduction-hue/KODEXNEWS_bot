@@ -76,6 +76,10 @@ class SectorStore:
                 ) for row in calls],
             )
 
+    def list_video_ids(self) -> set[str]:
+        with self._con() as con:
+            return {row[0] for row in con.execute("SELECT video_id FROM videos").fetchall()}
+
     def has_video(self, video_id: str) -> bool:
         with self._con() as con:
             return con.execute(

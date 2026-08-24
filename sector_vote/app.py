@@ -135,6 +135,10 @@ def create_app(
     def api_summary():
         return summary_data()
 
+    @app.get("/api/videos", dependencies=[Depends(require_token)])
+    def api_videos():
+        return {"video_ids": sorted(store.list_video_ids())}
+
     @app.get("/api/evidence", dependencies=[Depends(require_token)])
     def api_evidence():
         return store.list_calls()
