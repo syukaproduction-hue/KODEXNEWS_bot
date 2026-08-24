@@ -44,10 +44,10 @@ AUTH_COOKIE = "kdx_auth"
 GATE_EXEMPT = {"/login", "/login/auth", "/robots.txt", "/sitemap.xml",
                "/logo.svg", "/favicon.svg", "/favicon.ico", "/favicon-kodex.svg",
                "/tools", "/dividend", "/learn", "/survey", "/survey/vote", "/survey/comment",
-               "/quiz", "/calendar", "/cards"}
+               "/quiz", "/calendar", "/cards", "/sofa"}
 
 # 검색엔진에 수집을 허용할 대중용 경로. 내부 페이지(/archive, /plan, /check ...)는 계속 차단한다.
-PUBLIC_PATHS = ["/cards", "/tools", "/dividend", "/learn", "/survey", "/quiz", "/calendar"]
+PUBLIC_PATHS = ["/sofa", "/cards", "/tools", "/dividend", "/learn", "/survey", "/quiz", "/calendar"]
 
 _PS = getattr(settings, "PUBLIC_SITE", {}) or {}
 SITE_URL = (os.environ.get("SITE_URL") or _PS.get("site_url") or "").rstrip("/")
@@ -98,6 +98,10 @@ def _con():
         qid TEXT, choice TEXT, ts TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS survey_comments(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, text TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS sofa_games(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, asset TEXT, years INTEGER,
+        outcome TEXT, skilled INTEGER, my_ret REAL, sofa_ret REAL,
+        trades INTEGER, in_pct INTEGER, real_data INTEGER)""")
     for col in ("comp_name", "comp_code"):
         try:
             con.execute(f"ALTER TABLE product_news ADD COLUMN {col} TEXT")  # 기존 테이블 대비
@@ -1543,6 +1547,98 @@ def public_page(title, body, extra_head="", desc="", path="", banner=True):
 
 
 # =====================================================================
+#  소파 이기기 (/sofa) — 타이밍 게임 + 전체 장부 집계
+#  게임 화면은 sofa_game.html 파일을 그대로 내보낸다.
+# =====================================================================
+SOFA_PATH = _BASE / "sofa_game.html"
+SOFA_HIST = _BASE / "market_history.json"
+
+
+@app.get("/sofa", response_class=HTMLResponse)
+def sofa_game():
+    try:
+        html_text = SOFA_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return page("소파 이기기",
+                    "<div class='empty'>sofa_game.html 파일이 없습니다. "
+                    "web.py 와 같은 폴더에 올려 주세요.</div>", active="")
+    return HTMLResponse(html_text, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/sofa/market_history.json")
+def sofa_history():
+    """게임이 읽는 실제 시세 파일. 없으면 404 → 게임이 연습용 데이터로 동작한다."""
+    if not SOFA_HIST.exists():
+        return Response(status_code=404)
+    return Response(SOFA_HIST.read_text(encoding="utf-8"), media_type="application/json",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+_SOFA_ASSETS = {"kospi", "kosdaq", "samsung", "hynix", "bond"}
+
+
+@app.post("/sofa/record")
+async def sofa_record(req: Request):
+    """한 판 결과를 기록한다. 개인 식별 정보는 저장하지 않는다."""
+    try:
+        d = await req.json()
+    except Exception:
+        return JSONResponse({"ok": False}, status_code=400)
+
+    asset = str(d.get("asset", ""))[:20]
+    outcome = str(d.get("outcome", ""))[:8]
+    if asset not in _SOFA_ASSETS or outcome not in ("win", "lose", "tie"):
+        return JSONResponse({"ok": False}, status_code=400)
+
+    def num(key, lo, hi, cast=float):
+        try:
+            v = cast(d.get(key, 0))
+        except Exception:
+            return 0
+        return max(lo, min(hi, v))
+
+    try:
+        con = _con()
+        con.execute(
+            "INSERT INTO sofa_games(ts,asset,years,outcome,skilled,my_ret,sofa_ret,"
+            "trades,in_pct,real_data) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (datetime.now(KST).isoformat(), asset, int(num("years", 1, 10, int)), outcome,
+             1 if d.get("skilled") else 0,
+             num("my_ret", -100, 10000), num("sofa_ret", -100, 10000),
+             int(num("trades", 0, 100000, int)), int(num("in_pct", 0, 100, int)),
+             1 if d.get("real") else 0))
+        con.commit()
+        con.close()
+    except Exception:
+        return JSONResponse({"ok": False}, status_code=500)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/sofa/stats")
+def sofa_stats():
+    """전체 장부. Beat the Couch 의 THE LEDGER 에 해당한다."""
+    rows = _rows("SELECT outcome, COALESCE(skilled,0), COUNT(*) FROM sofa_games "
+                 "GROUP BY outcome, COALESCE(skilled,0)")
+    play = couch = lucky = skill = tie = 0
+    for outcome, skilled, cnt in rows:
+        play += cnt
+        if outcome == "lose":
+            couch += cnt
+        elif outcome == "tie":
+            tie += cnt
+        elif skilled:
+            skill += cnt
+        else:
+            lucky += cnt
+    if not play:
+        return JSONResponse({"play": 0})
+    r = lambda v: round(v / play * 100)
+    return JSONResponse({"play": play, "couch": couch, "lucky": lucky, "skill": skill,
+                         "tie": tie, "couch_pct": r(couch), "lucky_pct": r(lucky),
+                         "skill_pct": r(skill), "tie_pct": r(tie)})
+
+
+# =====================================================================
 #  대중용 시황 카드 페이지 (/cards)
 #  텔레그램 브리핑 원문에서 '지수·시장 흐름'만 뽑아 카드로 보여준다.
 #  상품명·종목코드·경쟁사·숏폼 소재는 내부 제작용이므로 공개 페이지에 내보내지 않는다.
@@ -1736,6 +1832,7 @@ def tools_hub():
         "<div class='hero'><h1>돈 공부, 가볍게 시작하기</h1>"
         "<p>계산해 보고, 알아보고, 다들 어떻게 하는지 살펴보세요.</p></div>"
         "<div class='ptiles'>"
+        + tile("/sofa", "🛋️", "소파 이기기", "차트가 흐르는 동안 사고팔아 '그냥 들고 있기'를 이겨보세요.")
         + tile("/cards", "📊", "오늘의 시황", "코스피 마감과 밤사이 미국장을 한 장으로. 매일 자동 업데이트.")
         + tile("/learn", "💡", "3분 투자 상식", "연금·투자·경제를 아주 쉽게. 매주 새 내용으로 바뀌어요.")
         + tile("/survey", "🗳️", "투자 설문", "다들 어떻게 하고 있는지 살짝 엿보기.")
