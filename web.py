@@ -99,9 +99,14 @@ def _con():
     con.execute("""CREATE TABLE IF NOT EXISTS survey_comments(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, text TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS sofa_games(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, asset TEXT, years INTEGER,
-        outcome TEXT, skilled INTEGER, my_ret REAL, sofa_ret REAL,
-        trades INTEGER, in_pct INTEGER, real_data INTEGER)""")
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, ymd TEXT, asset TEXT, years INTEGER,
+        outcome TEXT, skilled INTEGER, my_ret REAL, jar_ret REAL,
+        trades INTEGER, in_pct INTEGER, daily INTEGER, real_data INTEGER)""")
+    for col, typ in (("ymd", "TEXT"), ("jar_ret", "REAL"), ("daily", "INTEGER")):
+        try:
+            con.execute(f"ALTER TABLE sofa_games ADD COLUMN {col} {typ}")  # 기존 테이블 대비
+        except Exception:
+            pass
     for col in ("comp_name", "comp_code"):
         try:
             con.execute(f"ALTER TABLE product_news ADD COLUMN {col} TEXT")  # 기존 테이블 대비
@@ -1559,7 +1564,7 @@ def sofa_game():
     try:
         html_text = SOFA_PATH.read_text(encoding="utf-8")
     except Exception:
-        return page("소파 이기기",
+        return page("장독대 깨기",
                     "<div class='empty'>sofa_game.html 파일이 없습니다. "
                     "web.py 와 같은 폴더에 올려 주세요.</div>", active="")
     return HTMLResponse(html_text, headers={"Cache-Control": "no-cache"})
@@ -1598,14 +1603,17 @@ async def sofa_record(req: Request):
         return max(lo, min(hi, v))
 
     try:
+        now = datetime.now(KST)
         con = _con()
         con.execute(
-            "INSERT INTO sofa_games(ts,asset,years,outcome,skilled,my_ret,sofa_ret,"
-            "trades,in_pct,real_data) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (datetime.now(KST).isoformat(), asset, int(num("years", 1, 10, int)), outcome,
+            "INSERT INTO sofa_games(ts,ymd,asset,years,outcome,skilled,my_ret,jar_ret,"
+            "trades,in_pct,daily,real_data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (now.isoformat(), now.strftime("%Y-%m-%d"), asset,
+             int(num("years", 1, 10, int)), outcome,
              1 if d.get("skilled") else 0,
-             num("my_ret", -100, 10000), num("sofa_ret", -100, 10000),
+             num("my_ret", -100, 10000), num("jar_ret", -100, 10000),
              int(num("trades", 0, 100000, int)), int(num("in_pct", 0, 100, int)),
+             1 if d.get("daily") else 0,
              1 if d.get("real") else 0))
         con.commit()
         con.close()
@@ -1614,28 +1622,41 @@ async def sofa_record(req: Request):
     return JSONResponse({"ok": True})
 
 
-@app.get("/sofa/stats")
-def sofa_stats():
-    """전체 장부. Beat the Couch 의 THE LEDGER 에 해당한다."""
-    rows = _rows("SELECT outcome, COALESCE(skilled,0), COUNT(*) FROM sofa_games "
-                 "GROUP BY outcome, COALESCE(skilled,0)")
-    play = couch = lucky = skill = tie = 0
+def _tally(rows):
+    play = jar = lucky = skill = tie = 0
     for outcome, skilled, cnt in rows:
         play += cnt
         if outcome == "lose":
-            couch += cnt
+            jar += cnt
         elif outcome == "tie":
             tie += cnt
         elif skilled:
             skill += cnt
         else:
             lucky += cnt
+    return play, jar, lucky, skill, tie
+
+
+@app.get("/sofa/stats")
+def sofa_stats():
+    """전체 장부 + 오늘 집계."""
+    play, jar, lucky, skill, tie = _tally(
+        _rows("SELECT outcome, COALESCE(skilled,0), COUNT(*) FROM sofa_games "
+              "GROUP BY outcome, COALESCE(skilled,0)"))
     if not play:
         return JSONResponse({"play": 0})
+
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    tp, tj, tl, ts_, tt = _tally(
+        _rows("SELECT outcome, COALESCE(skilled,0), COUNT(*) FROM sofa_games "
+              "WHERE ymd=? GROUP BY outcome, COALESCE(skilled,0)", (today,)))
+
     r = lambda v: round(v / play * 100)
-    return JSONResponse({"play": play, "couch": couch, "lucky": lucky, "skill": skill,
-                         "tie": tie, "couch_pct": r(couch), "lucky_pct": r(lucky),
-                         "skill_pct": r(skill), "tie_pct": r(tie)})
+    return JSONResponse({
+        "play": play, "jar": jar, "lucky": lucky, "skill": skill, "tie": tie,
+        "jar_pct": r(jar), "lucky_pct": r(lucky), "skill_pct": r(skill), "tie_pct": r(tie),
+        "today": {"play": tp, "broke": tl + ts_, "jar": tj},
+    })
 
 
 # =====================================================================
@@ -1832,7 +1853,7 @@ def tools_hub():
         "<div class='hero'><h1>돈 공부, 가볍게 시작하기</h1>"
         "<p>계산해 보고, 알아보고, 다들 어떻게 하는지 살펴보세요.</p></div>"
         "<div class='ptiles'>"
-        + tile("/sofa", "🛋️", "소파 이기기", "차트가 흐르는 동안 사고팔아 '그냥 들고 있기'를 이겨보세요.")
+        + tile("/sofa", "🏺", "장독대 깨기", "대감이 장독대에 묻어둔 1,000만원. 사고팔아서 이겨보세요.")
         + tile("/cards", "📊", "오늘의 시황", "코스피 마감과 밤사이 미국장을 한 장으로. 매일 자동 업데이트.")
         + tile("/learn", "💡", "3분 투자 상식", "연금·투자·경제를 아주 쉽게. 매주 새 내용으로 바뀌어요.")
         + tile("/survey", "🗳️", "투자 설문", "다들 어떻게 하고 있는지 살짝 엿보기.")
