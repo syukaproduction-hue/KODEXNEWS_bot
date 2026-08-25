@@ -6,7 +6,11 @@ from sector_vote.local_collector import (
     collect_and_upload,
     collection_exit_code,
     fetch_known_video_ids,
+    load_batch_start,
     normalize_service_url,
+    save_batch_start,
+    select_channel_batch,
+    validate_cli_numbers,
 )
 
 
@@ -124,3 +128,87 @@ def test_collector_isolates_malformed_video_timestamp():
 
 def test_completed_noop_run_is_success():
     assert collection_exit_code({"videos_uploaded": 0, "errors": []}) == 0
+
+
+def test_channel_batches_rotate_without_overlap():
+    channels = [{"name": str(i)} for i in range(20)]
+
+    first, next_start = select_channel_batch(channels, start=0, batch_size=5)
+    last, wrapped_start = select_channel_batch(channels, start=15, batch_size=5)
+
+    assert [row["name"] for row in first] == ["0", "1", "2", "3", "4"]
+    assert next_start == 5
+    assert [row["name"] for row in last] == ["15", "16", "17", "18", "19"]
+    assert wrapped_start == 0
+
+
+def test_collector_stops_immediately_when_ip_is_blocked():
+    class IpBlocked(Exception):
+        pass
+
+    videos = [
+        {"video_id": "one", "title": "1", "published_at": "2026-08-24T00:00:00+00:00", "url": "https://youtu.be/one"},
+        {"video_id": "two", "title": "2", "published_at": "2026-08-24T00:00:00+00:00", "url": "https://youtu.be/two"},
+    ]
+    attempts = []
+
+    def blocked(video_id):
+        attempts.append(video_id)
+        raise IpBlocked("blocked")
+
+    result = collect_and_upload(
+        channels=[{"name": "채널A"}],
+        service_url="https://sector.example",
+        token="secret",
+        now=datetime(2026, 8, 24, 6, 0, tzinfo=timezone.utc),
+        lookback_hours=36,
+        known_video_ids=set(),
+        fetch_videos=lambda _channel: videos,
+        fetch_script=blocked,
+        upload=lambda *_args: None,
+    )
+
+    assert attempts == ["one"]
+    assert result["ip_blocked"] is True
+
+
+def test_collector_waits_between_transcript_requests():
+    videos = [
+        {"video_id": "one", "title": "1", "published_at": "2026-08-24T00:00:00+00:00", "url": "https://youtu.be/one"},
+        {"video_id": "two", "title": "2", "published_at": "2026-08-24T00:00:00+00:00", "url": "https://youtu.be/two"},
+    ]
+    sleeps = []
+
+    result = collect_and_upload(
+        channels=[{"name": "채널A"}],
+        service_url="https://sector.example",
+        token="secret",
+        now=datetime(2026, 8, 24, 6, 0, tzinfo=timezone.utc),
+        lookback_hours=36,
+        known_video_ids=set(),
+        fetch_videos=lambda _channel: videos,
+        fetch_script=lambda _video_id: "다음 거래일 반도체 전망을 설명하는 충분히 긴 자막입니다.",
+        upload=lambda *_args: None,
+        delay_seconds=12,
+        sleeper=sleeps.append,
+    )
+
+    assert result["videos_uploaded"] == 2
+    assert sleeps == [12]
+
+
+def test_cli_numbers_reject_non_finite_or_invalid_values():
+    for invalid_delay in (float("nan"), float("inf"), float("-inf"), -1):
+        with pytest.raises(ValueError):
+            validate_cli_numbers(hours=36, max_per_channel=1, batch_size=5, delay=invalid_delay)
+
+    validate_cli_numbers(hours=36, max_per_channel=1, batch_size=5, delay=0)
+
+
+def test_batch_state_round_trip_is_atomic(tmp_path):
+    state = tmp_path / ".collector-state.json"
+
+    save_batch_start(state, 10)
+
+    assert load_batch_start(state) == 10
+    assert not (tmp_path / ".collector-state.json.tmp").exists()
