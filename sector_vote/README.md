@@ -7,7 +7,7 @@
 
 - `/` — 내일 섹터 한표
 - `/methodology` — 집계 기준과 분석 채널
-- `/api/summary` — 인물명이 없는 공개 섹터 합계 JSON
+- `/api/summary` — 최근 36시간 합의, 최근 7일 관심 섹터, 채널별 짧은 근거 JSON
 - `/health` — 상태 확인
 
 ## 보호된 운영 API
@@ -19,7 +19,7 @@
 - `GET /api/evidence` — 채널명·영상 링크·짧은 인용을 포함한 내부 검증 자료
 - `POST /api/ingest/transcript` — 외부 수집기가 전달한 스크립트 분석
 
-영상 전문은 DB에 저장하지 않습니다. 공개 화면에도 유튜버별 순위와 원문을 노출하지 않습니다.
+영상 전문은 DB에 저장하지 않습니다. 공개 화면에는 유튜버별 순위를 만들지 않고, 판정 투명성을 위한 채널명·120자 이내 인용·원본 영상 링크만 제공합니다.
 
 ## 집계 원칙
 
@@ -27,7 +27,8 @@
 2. 한 채널은 한 섹터에 한 표만 반영하며, 같은 섹터에 여러 발언이 있으면 최신 판정을 사용합니다.
 3. 구독자 수·인지도 가중치를 사용하지 않습니다.
 4. 장기 전망, 개별 종목, ETF·상품 추천은 집계에서 제외합니다.
-5. 공개 화면은 섹터별 강세·중립·약세 합계만 표시합니다.
+5. 메인 합의는 최근 36시간, 관심 섹터는 최근 7일을 기준으로 표시합니다.
+6. 채널별 근거는 순위가 아니라 해당 표의 출처 확인용으로만 제공합니다.
 
 ## 로컬 실행
 
@@ -62,13 +63,29 @@ uv run --with-requirements sector_vote/requirements-dev.txt ruff check sector_vo
 3. `/data`에 Railway Volume 연결
 4. Variables 설정
    - `ANTHROPIC_API_KEY`
+   - `SUPADATA_API_KEY` — Railway IP 차단을 우회하는 관리형 자막 API 키
    - `SECTOR_ADMIN_TOKEN` — 길고 무작위인 별도 값
    - `SECTOR_DB_PATH=/data/sector_vote.db`
 5. Health check: `/health`
 
-## Railway가 YouTube 자막을 차단당할 때: 로컬 수집기
+## 서버 자동 수집
 
-YouTube는 Railway 같은 클라우드 IP의 자막 요청을 차단할 수 있습니다. 이 경우 Windows PC의 일반 인터넷 회선에서 자막만 수집하고, 보호된 API로 Railway에 전송합니다. AI 분류와 DB 저장은 Railway가 계속 담당합니다.
+Railway의 클라우드 IP는 YouTube 자막 요청이 차단될 수 있으므로, 운영 서버에서는 Supadata의 관리형 Transcript API를 사용합니다.
+
+1. Supadata에서 API 키를 발급합니다: <https://supadata.ai/>
+2. Railway 새 섹터 서비스의 Variables에 `SUPADATA_API_KEY`를 추가합니다.
+3. 재배포되면 서버 시작 직후 첫 수집을 실행하고, 이후 기본 360분(6시간)마다 자동 실행합니다.
+4. 주기를 바꾸려면 `SECTOR_AUTO_REFRESH_MINUTES`를 설정합니다. `0`이면 자동 실행을 끕니다.
+5. `/health`의 `automation`에서 활성화 여부·주기·공급자를 확인합니다.
+6. 상세 성공·실패 내역은 관리자 토큰으로 `/api/refresh/status`에서 확인합니다.
+
+Supadata 요청은 `mode=native`로 고정해 기존 YouTube 자막만 가져오며, 비용이 큰 AI 음성 전사는 자동 실행하지 않습니다. 공급자 문서상 네이티브 자막 1건은 1크레딧입니다. 유료 호출 전 SQLite에 영상 작업을 원자적으로 선점하므로 중복 프로세스가 같은 영상을 동시에 결제하지 않습니다. 자막 없음은 영구 제외하고, 일시 오류는 6시간 뒤에만 재시도합니다.
+
+운영 데이터는 최근 30일 메타데이터·짧은 인용·판정만 보관하며 자동 갱신 때 이전 자료를 삭제합니다. 전체 자막은 저장하지 않습니다. Docker 기본 명령은 Uvicorn 단일 worker이며, Railway에서도 기본 1 replica 운영을 권장합니다. 복수 프로세스가 겹쳐도 SQLite 작업 선점이 동일 영상 중복 결제를 방지합니다.
+
+## 비상용 로컬 수집기
+
+관리형 자막 API 장애나 크레딧 소진 때만 Windows PC 수집기를 비상 수단으로 사용할 수 있습니다. 평상시 운영에는 로컬 PC가 필요하지 않습니다.
 
 ### 가장 쉬운 실행 방법
 
@@ -103,9 +120,9 @@ uv run --with-requirements sector_vote/requirements.txt python -m sector_vote.lo
 uv run --with-requirements sector_vote/requirements.txt python -m sector_vote.local_collector --url https://example.up.railway.app
 ```
 
-## 자동 갱신
+## 수동 갱신
 
-cron-job.org 같은 외부 스케줄러에서 평일 오전 또는 원하는 시각에 아래 요청을 보냅니다.
+자동 주기 사이에 즉시 다시 확인하려면 아래 보호 API를 호출합니다.
 
 ```bash
 curl -X POST "https://새-서비스주소/api/refresh" \
@@ -119,12 +136,14 @@ curl -X POST "https://새-서비스주소/api/refresh" \
 | 변수 | 필수 | 설명 |
 |---|---:|---|
 | `ANTHROPIC_API_KEY` | 예 | 스크립트 섹터 분류 |
+| `SUPADATA_API_KEY` | 자동화 시 예 | 관리형 YouTube 자막 수집 |
 | `SECTOR_ADMIN_TOKEN` | 예 | 운영 API 보호 |
 | `SECTOR_DB_PATH` | 권장 | 운영에서는 `/data/sector_vote.db` |
+| `SECTOR_AUTO_REFRESH_MINUTES` | 아니오 | 기본 360분, `0`이면 자동화 끔 |
 | `PORT` | Railway 자동 | Uvicorn 포트 |
 
 ## 운영 유의사항
 
-- 자동 생성 자막이 없거나 YouTube가 서버 IP의 자막 요청을 제한하면 해당 영상은 오류 목록에 남고 나머지 채널은 계속 처리합니다.
+- 네이티브 자막이 없는 영상은 오류 목록에 남기고 나머지 채널을 계속 처리합니다. AI 음성 전사는 비용 통제를 위해 사용하지 않습니다.
 - 박종훈팀장(바이킹스)은 공동 채널의 영상 제목에 `박종훈` 또는 `바이킹스`가 포함된 경우만 수집합니다.
 - 유튜브 스크립트·데이터 사용 범위, 시장 데이터의 라이선스, 공개 문구는 정식 공개 전 별도 검토가 필요합니다.
